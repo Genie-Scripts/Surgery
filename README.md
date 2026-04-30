@@ -96,29 +96,29 @@ cp /path/to/anonymized_data.csv data/raw/
 
 ## 使い方
 
-### CLI
-
-```bash
-# 1. 生CSVを読み込み、文字コード正規化
-python -m src.cli ingest
-
-# 2. カテゴリ抽出（regex + LLM）
-python -m src.cli classify
-
-# 3. KPI 集計
-python -m src.cli aggregate
-
-# 4. すべて一括
-python -m src.cli run-all
-```
-
 ### Streamlit ダッシュボード
 
 ```bash
 streamlit run app/main.py
 ```
 
-ブラウザで `http://localhost:8501` を開く。
+ブラウザで `http://localhost:8501` を開く。サイドバーから:
+- **CSV パス**を指定（デフォルトはルート直下の `anonymized_data.csv`）
+- **執刀医モード**（`執刀医のみ` / `執刀医＋助手を含む`）
+- **申込区分** / **実施診療科** / **全身麻酔のみ** で絞り込み
+- **LLM 第 2 段を適用** チェックで Swallow-8B によるカテゴリ判定の有効化（Ollama 未起動時は自動で regex のみに降格）
+
+### CLI（Phase 2 で追加予定）
+
+`src/cli.py` 経由でのバッチ実行は今後追加。現状は Streamlit と Python REPL から各モジュールを直接利用する想定。
+
+### LLM 第 2 段の挙動
+
+`src/classify_llm.py` は `LLM判定要 == True`（regex 0 件ヒット or 2 件以上ヒット）の症例に対して Swallow-8B を呼び出す。`config/llm_config.yaml` で接続先・モデルを設定。
+
+- **キャッシュ**: `data/llm_cache/categories.json` (sha256 ベース、ルールバージョン込み)
+- **OR 結合**: regex 結果と LLM 結果を OR 結合し、LLM が拾い損ねた regex 確実ケースを保護
+- **ハードガード**（spec §7.2.2）: 規則ベースで一意判定可能なロボット 2 区分と「良性」明記の悪性腫瘍は決定論的に補正
 
 ### ローカル実名版ビルド（Phase 2）
 
