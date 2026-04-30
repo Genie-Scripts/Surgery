@@ -1,0 +1,43 @@
+# --- 個人情報・機微データ（コミット厳禁）---
+# 生データ・匿名化済みデータの両方を ignore（誤コミット防止のため安全側）
+data/raw/
+data/normalized/
+data/llm_cache/
+
+# ローカル実名版の出力先
+local/
+
+# 補助対応表（実名↔匿名 ID）
+config/master_key.csv
+config/master_key.*.csv
+config/peers.csv
+
+# サンプル CSV（ルート直下に置かれた状態のもの。匿名化済みでも安全側で除外）
+/anonymized_data*.csv
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# --- macOS / IDE ---
+.DS_Store
+.vscode/
+.idea/
+*.swp

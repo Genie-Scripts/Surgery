@@ -1,0 +1,59 @@
+# カテゴリ抽出ルール（regex 第 1 段）
+#
+# 構造:
+#   <category_id>:
+#     display_name: 表示名（日本語）
+#     patterns:         OR 条件で照合する正規表現またはリテラル（部分一致）
+#     exclude_patterns: AND NOT 条件。patterns に当たっても除外する
+#     k_codes:          術式コード接頭辞（現サンプル CSV には K コード列が無いため Phase 2 で活用予定）
+#
+# 照合対象列: `確定術式`（自由記述、セル内 \r\n で複数行連結あり）
+# 大文字小文字は区別しない。半角/全角は照合前に正規化推奨（src/ingest.py 側で実施）。
+#
+# 第 1 段で 0 件ヒット または 2 件以上ヒット（カテゴリ重複）の症例は LLM 第 2 段へ回す。
+# 詳細は spec.md §7 を参照。
+
+malignant_tumor:
+  display_name: 悪性腫瘍
+  patterns:
+    - "癌"
+    - "がん"
+    - "ガン"
+    - "悪性"
+    - "腫瘍.*切除"   # 良性除外は LLM 二次判定で
+  exclude_patterns: []
+  k_codes:
+    - "K6"
+    - "K7"
+
+artificial_joint:
+  display_name: 人工関節
+  patterns:
+    - "人工.*関節"
+    - "人工股関節"
+    - "人工膝関節"
+    - "全人工股関節"
+    - "全人工膝関節"
+    - "T[HK]A"        # THA / TKA
+  exclude_patterns: []
+  k_codes: []
+
+robot_assisted_davinci:
+  display_name: ロボット支援（ダヴィンチ系）
+  # 保険上「内視鏡下手術用支援機器使用」加算を伴う症例。一般消化器/泌尿器/産婦/呼吸器など。
+  # 2026-04 サンプルでは 37 件ヒット（OQ-6 解決時に確認）。
+  patterns:
+    - "手術用支援"
+  exclude_patterns: []
+  k_codes: []
+
+robot_assisted_other:
+  display_name: ロボット支援（非ダヴィンチ系）
+  # 整形外科の人工関節ロボット等、術式名末尾の `（ロボット）` 表記。
+  # 2026-04 サンプルでは 5 件（全て整形外科の人工関節置換術）。
+  patterns:
+    - "ロボット"
+  exclude_patterns:
+    - "手術用支援"        # ダヴィンチ系と二重カウントしない
+    - "画像等手術支援"    # ナビゲーション加算は別物
+  k_codes: []

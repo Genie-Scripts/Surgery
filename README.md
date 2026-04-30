@@ -1,0 +1,234 @@
+# Surgery
+
+外科手術データから **術者評価** と **カテゴリ別分析** を可視化するダッシュボード。
+
+- **ローカル実名版**: 自分の Mac で Streamlit として動かす
+- **匿名化 web 版**: 静的 HTML を GitHub Pages 等で配信（Phase 2）
+
+詳細な要件は [spec.md](./spec.md) を参照。
+
+---
+
+## 概要
+
+| 項目 | 内容 |
+|---|---|
+| 入力 | 手術データ CSV（術者 ID 事前匿名化済み） |
+| 抽出カテゴリ | 悪性腫瘍 / 人工関節 / ロボット支援（MVP） |
+| KPI | 件数 / 総手術時間 / 平均手術時間 / 月次推移 / 同僚比較 / 難度補正 |
+| LLM | Ollama + Llama-3.1-Swallow-8B-Instruct-v0.5 (Q6_K) |
+| UI | Streamlit |
+
+---
+
+## 必要環境
+
+- macOS（Apple Silicon 推奨）
+- Python 3.11 以上
+- [Ollama](https://ollama.com/)（既導入想定）
+- メモリ 16GB 以上（Q6_K 推奨は 64GB）
+
+---
+
+## セットアップ
+
+### 1. リポジトリをクローン
+
+```bash
+cd /Users/genie/dev/ai-apps
+git clone <remote> Surgery   # もしくはローカル初期化
+cd Surgery
+```
+
+新規ローカル初期化の場合:
+
+```bash
+cd /Users/genie/dev/ai-apps/Surgery
+git init
+git add spec.md README.md
+git commit -m "chore: initial spec and readme"
+```
+
+### 2. Python 仮想環境
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e '.[dev]'   # pyproject.toml の依存を取り込む（実装着手後）
+```
+
+### 3. Ollama モデルを pull
+
+Phase A（カテゴリ自動判定）で使用する LLM をローカルにダウンロード：
+
+```bash
+ollama pull hf.co/mmnga/Llama-3.1-Swallow-8B-Instruct-v0.5-gguf:Q6_K
+```
+
+Ollama サーバが未起動なら自動で起動する仕組みを `src/llm_client.py` に内包する予定（Outpatient-Dashboard と同パターン）。手動起動する場合：
+
+```bash
+ollama serve
+```
+
+### 4. 設定ファイル（実装着手後に整備）
+
+```
+config/
+├── categories.yaml        # カテゴリ抽出ルール（YAML）
+├── llm_config.yaml        # Ollama 接続設定
+└── peers.csv              # 同僚比較対象（必要に応じ）
+```
+
+それぞれ雛形は実装フェーズで生成する。
+
+### 5. データ配置
+
+```bash
+mkdir -p data/raw
+cp /path/to/anonymized_data.csv data/raw/
+```
+
+> ⚠️ **`data/raw/` は `.gitignore` 対象**（Git にコミットしない）。
+
+---
+
+## 使い方
+
+### CLI
+
+```bash
+# 1. 生CSVを読み込み、文字コード正規化
+python -m src.cli ingest
+
+# 2. カテゴリ抽出（regex + LLM）
+python -m src.cli classify
+
+# 3. KPI 集計
+python -m src.cli aggregate
+
+# 4. すべて一括
+python -m src.cli run-all
+```
+
+### Streamlit ダッシュボード
+
+```bash
+streamlit run app/main.py
+```
+
+ブラウザで `http://localhost:8501` を開く。
+
+### ローカル実名版ビルド（Phase 2）
+
+```bash
+./scripts/local_build.sh
+```
+
+`local/` 配下に静的レポートが生成される（`.gitignore` 対象）。
+
+---
+
+## ディレクトリ構成
+
+```
+Surgery/
+├── README.md           # 本ファイル
+├── spec.md             # 要件定義
+├── CLAUDE.md           # Claude Code 向けプロジェクト指示書
+├── pyproject.toml      # 依存と lint 設定
+├── .gitignore
+│
+├── src/                # ロジック本体
+│   ├── ingest.py       # CSV 読込・文字コード正規化
+│   ├── classify.py     # カテゴリ抽出 (regex + LLM)
+│   ├── aggregate.py    # KPI 集計
+│   ├── llm_client.py   # Ollama クライアント
+│   ├── cli.py          # CLI 統合
+│   └── core/           # KPI / peer_compare / difficulty
+│
+├── app/                # Streamlit
+│   ├── main.py
+│   ├── pages/          # 全体KPI / 術者別 / カテゴリ別 / 月次推移
+│   └── components/
+│
+├── config/             # ルール・接続設定
+├── data/
+│   ├── raw/            # ※Gitコミット禁止
+│   ├── normalized/
+│   ├── aggregated/
+│   └── llm_cache/
+│
+├── docs/               # 公開用静的HTML（Phase 2）
+├── local/              # ローカル実名版出力 ※Gitコミット禁止
+├── scripts/            # pull.sh / deploy.sh / local_build.sh
+├── tests/              # pytest
+└── tools/              # ラベリングUI 等（Phase 2）
+```
+
+完全なディレクトリ構成と各ファイルの役割は [spec.md §9](./spec.md) を参照。
+
+---
+
+## データ・セキュリティ
+
+| 種別 | 場所 | Git 管理 |
+|---|---|---|
+| 生データ CSV | `data/raw/` | **コミット禁止** |
+| 補助対応表（実名↔匿名） | `config/master_key.csv` 等 | **コミット禁止** |
+| ローカル実名版出力 | `local/` | **コミット禁止** |
+| 集計済みデータ | `data/aggregated/` | コミット可 |
+| LLM キャッシュ | `data/llm_cache/` | 不要（再生成可） |
+
+`.gitignore` で上記を除外する。新規ファイル追加前に `git status` で意図しない含有がないか必ず確認。
+
+---
+
+## 文字コード問題への対処
+
+入力 CSV は **Windows 出力（Shift-JIS / CP932）→ Mac 編集（UTF-8）** ワークフローのため文字化けが起きやすい。`src/ingest.py` で以下のフォールバック順に試行する：
+
+1. `utf-8-sig`（BOM 付き）
+2. `cp932`
+3. `shift_jis`
+4. `utf-8`
+
+判別失敗時は `chardet` で検出するエラー処理を入れる。詳細は実装時に。
+
+---
+
+## トラブルシューティング
+
+### Ollama に接続できない
+
+```bash
+curl http://localhost:11434/
+```
+
+200 が返らない場合は `ollama serve` を別ターミナルで起動。
+
+### Streamlit のポートが占有されている
+
+```bash
+streamlit run app/main.py --server.port 8502
+```
+
+### LLM 出力が定型文（フォールバック）ばかりになる
+
+`config/llm_config.yaml` のモデル名を確認し、`ollama list` で pull 済みかチェック。Outpatient-Dashboard と同様、思考型モデルではなく **instruct** 系（Swallow / Qwen-Instruct）を使うこと。
+
+---
+
+## ライセンス
+
+未定（個人プロジェクト）。
+
+---
+
+## 関連プロジェクト
+
+- [Outpatient-Dashboard](../Outpatient-Dashboard/) — 外来効率化ダッシュボード（経営企画室向け）
+- [Outpatient-Restructuring](../Outpatient-Restructuring/) — 外来枠再編診断
+
+3 プロジェクトとも同一マシンで運用するが、Surgery はリポジトリ・依存・運用すべて独立。LLM クライアントの設計だけ Outpatient-Dashboard から踏襲する。
