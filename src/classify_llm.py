@@ -32,18 +32,43 @@ RULE_VERSION: str = "v1"
 
 CACHE_PATH_DEFAULT = Path(__file__).resolve().parent.parent / "data" / "llm_cache" / "categories.json"
 
-# ハードガード: LLM が誤判定しても、`確定術式` に必須キーワードが無ければ強制 False。
-# 対象は規則ベースで一意に判定可能な保険請求文字列を持つロボット 2 区分のみ。
-# 悪性腫瘍・人工関節は LLM の医療知識による拡張に意味があるためハードガード対象外。
-HARD_GUARD: dict[str, str] = {
-    "robot_assisted_davinci": "手術用支援",
-    "robot_assisted_other": "ロボット",
+# ハードガード: regex / LLM どちらの判定でも、確定術式の文字列要件を満たさなければ強制 False。
+#   required: 1 つも含まれなければ強制 False（保険請求文字列で一意に判定できる症例向け）
+#   forbidden: 1 つでも含まれれば強制 False（"良性" 等の明確な除外条件向け）
+# 悪性腫瘍/人工関節 は LLM の医療知識による拡張に価値があるが、明白な誤判定（"良性"明記症例、
+# 良性 K コードの皮下腫瘍摘出術 K005）だけは決定論的に切る。
+HARD_GUARD: dict[str, dict[str, list[str]]] = {
+    "robot_assisted_davinci": {"required": ["手術用支援"]},
+    "robot_assisted_other": {"required": ["ロボット"]},
+    "malignant_tumor": {
+        "forbidden": [
+            "良性",                        # 明示的に良性と書かれているもの
+            "皮膚、皮下腫瘍摘出術",        # K005（良性）。悪性は K006「皮膚悪性腫瘍切除術」が別途存在
+        ],
+    },
 }
 
 
 def _apply_hard_guard(ids: list[str], text: str) -> list[str]:
-    """LLM 判定結果から、確定術式に必須キーワードが無いカテゴリを除去。"""
-    return [i for i in ids if i not in HARD_GUARD or HARD_GUARD[i] in text]
+    """LLM/regex 判定結果から、確定術式の要件を満たさないカテゴリを除去。
+
+    required (any-of): 1 つも含まれなければ除去
+    forbidden (any-of): 1 つでも含まれれば除去
+    """
+    result = []
+    for cid in ids:
+        rule = HARD_GUARD.get(cid)
+        if rule is None:
+            result.append(cid)
+            continue
+        required = rule.get("required", [])
+        forbidden = rule.get("forbidden", [])
+        if required and not any(kw in text for kw in required):
+            continue
+        if forbidden and any(kw in text for kw in forbidden):
+            continue
+        result.append(cid)
+    return result
 
 
 def _build_prompt(text: str, rules: list[CategoryRule]) -> str:
@@ -198,16 +223,13 @@ def classify_with_llm(
             continue
 
         ids, source = classify_one(text, rules, client, cache)
-        # regex 結果（最低保証）と LLM 結果を OR 結合し、最後にハードガードを適用。
+        # regex 結果（最低保証）と LLM 結果を OR 結合（ハードガードは最終一括適用で行う）。
         # こうすれば LLM が拾い損ねた regex 確実ケースを保持しつつ、
-        # 文字列要件を満たさない LLM 過剰検出はガードで切る。
+        # 文字列要件を満たさない過剰検出は最終パスで一括除去できる。
         for cid in valid_ids:
             regex_says_true = bool(out.at[idx, cid])
             llm_says_true = cid in ids
-            merged = regex_says_true or llm_says_true
-            if cid in HARD_GUARD and HARD_GUARD[cid] not in text:
-                merged = False
-            out.at[idx, cid] = merged
+            out.at[idx, cid] = regex_says_true or llm_says_true
         out.at[idx, "分類元"] = source
 
         if progress and n_done % 25 == 0:
@@ -216,6 +238,20 @@ def classify_with_llm(
     if len(cache) > cache_size_before:
         _cache_save(cache_path, cache)
         logger.info("LLM キャッシュ %d → %d 件に更新", cache_size_before, len(cache))
+
+    # ハードガードを全行に最終適用 (regex-only 行も含む)
+    text_col = out[target_column].fillna("")
+    for cid, rule in HARD_GUARD.items():
+        if cid not in out.columns:
+            continue
+        required = rule.get("required", [])
+        forbidden = rule.get("forbidden", [])
+        if required:
+            mask = ~text_col.apply(lambda t, kws=required: any(kw in t for kw in kws))
+            out.loc[mask, cid] = False
+        if forbidden:
+            mask = text_col.apply(lambda t, kws=forbidden: any(kw in t for kw in kws))
+            out.loc[mask, cid] = False
 
     # ヒット数の再計算
     out["カテゴリヒット数"] = out[valid_ids].sum(axis=1).astype("int64")
