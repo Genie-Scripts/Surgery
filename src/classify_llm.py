@@ -200,21 +200,21 @@ def classify_with_llm(
 
     out = df.copy()
     out["分類元"] = "regex"
+    valid_ids = [r.category_id for r in rules]
 
     target_idx = out.index[out["LLM判定要"]]
     n_target = len(target_idx)
-    if n_target == 0:
-        return out
 
-    if not client.is_available():
+    # LLM 判定要の行が存在し、かつクライアントが利用可能な場合のみ LLM ループを走らせる。
+    # それ以外は regex 結果を維持して最終ハードガードに進む（regex の False Positive も補正可能）。
+    run_llm = n_target > 0 and client.is_available()
+    if n_target > 0 and not run_llm:
         logger.warning("LLM 利用不可 → regex 第 1 段の結果のみで進行")
-        return out
 
-    cache = _cache_load(cache_path)
+    cache: dict[str, list[str]] = _cache_load(cache_path) if run_llm else {}
     cache_size_before = len(cache)
-    valid_ids = [r.category_id for r in rules]
 
-    for n_done, idx in enumerate(target_idx, start=1):
+    for n_done, idx in enumerate(target_idx if run_llm else [], start=1):
         text = out.at[idx, target_column]
         if not isinstance(text, str) or not text:
             out.at[idx, "分類元"] = "llm_fallback"
