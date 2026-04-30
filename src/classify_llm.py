@@ -32,6 +32,19 @@ RULE_VERSION: str = "v1"
 
 CACHE_PATH_DEFAULT = Path(__file__).resolve().parent.parent / "data" / "llm_cache" / "categories.json"
 
+# ハードガード: LLM が誤判定しても、`確定術式` に必須キーワードが無ければ強制 False。
+# 対象は規則ベースで一意に判定可能な保険請求文字列を持つロボット 2 区分のみ。
+# 悪性腫瘍・人工関節は LLM の医療知識による拡張に意味があるためハードガード対象外。
+HARD_GUARD: dict[str, str] = {
+    "robot_assisted_davinci": "手術用支援",
+    "robot_assisted_other": "ロボット",
+}
+
+
+def _apply_hard_guard(ids: list[str], text: str) -> list[str]:
+    """LLM 判定結果から、確定術式に必須キーワードが無いカテゴリを除去。"""
+    return [i for i in ids if i not in HARD_GUARD or HARD_GUARD[i] in text]
+
 
 def _build_prompt(text: str, rules: list[CategoryRule]) -> str:
     """カテゴリ判定プロンプトを組み立てる（spec §7.2）。
@@ -122,7 +135,8 @@ def classify_one(
         }
     )
     if key in cache:
-        return [c for c in cache[key] if c in valid_ids], "cache"
+        cached = [c for c in cache[key] if c in valid_ids]
+        return _apply_hard_guard(cached, text), "cache"
 
     prompt = _build_prompt(text, rules)
     try:
@@ -136,8 +150,10 @@ def classify_one(
         logger.warning("LLM 応答のパース失敗 → 空リストでフォールバック: %r", response[:200])
         return [], "llm_fallback"
 
+    # キャッシュには raw 判定を保存（ガードは取り出し時に毎回適用）。
+    # こうしておけばガードの基準を変えてもキャッシュを再利用できる。
     cache[key] = parsed
-    return parsed, "llm"
+    return _apply_hard_guard(parsed, text), "llm"
 
 
 def classify_with_llm(
@@ -182,8 +198,16 @@ def classify_with_llm(
             continue
 
         ids, source = classify_one(text, rules, client, cache)
+        # regex 結果（最低保証）と LLM 結果を OR 結合し、最後にハードガードを適用。
+        # こうすれば LLM が拾い損ねた regex 確実ケースを保持しつつ、
+        # 文字列要件を満たさない LLM 過剰検出はガードで切る。
         for cid in valid_ids:
-            out.at[idx, cid] = cid in ids
+            regex_says_true = bool(out.at[idx, cid])
+            llm_says_true = cid in ids
+            merged = regex_says_true or llm_says_true
+            if cid in HARD_GUARD and HARD_GUARD[cid] not in text:
+                merged = False
+            out.at[idx, cid] = merged
         out.at[idx, "分類元"] = source
 
         if progress and n_done % 25 == 0:
