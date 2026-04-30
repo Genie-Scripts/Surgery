@@ -24,21 +24,41 @@ from src.aggregate import (
     kpi_per_doctor,
     monthly_trend,
 )
-from src.classify import classify
+from src.classify import classify, load_rules
+from src.classify_llm import classify_with_llm
 from src.ingest import load
+from src.llm_client import LLMClient
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CSV = ROOT / "anonymized_data.csv"
+LLM_CONFIG = ROOT / "config" / "llm_config.yaml"
 
 st.set_page_config(page_title="Surgery Dashboard", layout="wide")
 
 
 @st.cache_data(show_spinner="CSV 読込・カテゴリ分類中...")
-def load_pipeline(path: str) -> pd.DataFrame:
+def load_pipeline(path: str, run_llm: bool) -> tuple[pd.DataFrame, str]:
+    """CSV を読み込み、regex 第 1 段 → (任意) LLM 第 2 段の順で分類して返す。
+
+    返り値: (df, status_message)。status は UI 表示用の文字列。
+    """
     df = load(path)
     df = classify(df)
+
+    if run_llm:
+        client = LLMClient(LLM_CONFIG)
+        if client.is_available():
+            df = classify_with_llm(df, load_rules(), client)
+            status = "LLM 第 2 段適用済 (キャッシュ＋ハードガード経由)"
+        else:
+            df["分類元"] = "regex"
+            status = "Ollama 未起動 → regex 第 1 段のみ"
+    else:
+        df["分類元"] = "regex"
+        status = "LLM スキップ → regex 第 1 段のみ"
+
     df["全身麻酔"] = df["麻酔種別"].apply(is_general_anesthesia)
-    return df
+    return df, status
 
 
 # ----- Sidebar (filters) -------------------------------------------------
@@ -51,7 +71,11 @@ if not csv_p.exists():
     st.error(f"ファイルが見つかりません: {csv_p}")
     st.stop()
 
-df = load_pipeline(str(csv_p))
+run_llm = st.sidebar.checkbox(
+    "LLM 第 2 段を適用 (Swallow-8B + ハードガード)", value=True
+)
+
+df, pipeline_status = load_pipeline(str(csv_p), run_llm)
 
 operator_mode_label = st.sidebar.radio(
     "執刀医モード",
@@ -88,6 +112,7 @@ st.title("Surgery Dashboard")
 st.caption(
     f"読込: `{csv_p.name}` ／ 全 {len(df):,} 件中 {len(df_f):,} 件を表示中"
     f"（執刀医モード = {operator_mode_label}{' / 全身麻酔のみ' if ga_only else ''}）"
+    f"｜ {pipeline_status}"
 )
 
 st.divider()
@@ -115,18 +140,34 @@ else:
     col_b.line_chart(mt_indexed[["平均手術時間_分"]])
 
 st.divider()
-st.subheader("カテゴリ別件数（regex 第 1 段）")
+st.subheader("カテゴリ別件数")
 
 cat = category_counts(df_f)
+col_cat, col_src = st.columns([2, 1])
+
 if cat.empty:
-    st.info("カテゴリ列がありません")
+    col_cat.info("カテゴリ列がありません")
 else:
     cat_disp = cat.assign(構成比=lambda d: (d["件数"] / max(len(df_f), 1) * 100).round(1))
     cat_disp.columns = ["カテゴリ", "件数", "構成比 (%)"]
-    st.dataframe(cat_disp, use_container_width=True, hide_index=True)
-    n_llm = int(df_f["LLM判定要"].sum()) if "LLM判定要" in df_f.columns else 0
-    st.caption(
-        f"LLM 第 2 段に回す症例（0 件ヒット or 2 件以上ヒット）: {n_llm:,} 件"
+    col_cat.dataframe(cat_disp, use_container_width=True, hide_index=True)
+    n_target = int(df_f["LLM判定要"].sum()) if "LLM判定要" in df_f.columns else 0
+    col_cat.caption(
+        f"regex で 0 件ヒット or 2 件以上ヒット (LLM 第 2 段の対象): {n_target:,} 件"
+    )
+
+if "分類元" in df_f.columns:
+    src_counts = (
+        df_f["分類元"]
+        .value_counts()
+        .rename_axis("分類元")
+        .reset_index(name="件数")
+    )
+    col_src.markdown("**分類元の内訳**")
+    col_src.dataframe(src_counts, use_container_width=True, hide_index=True)
+    col_src.caption(
+        "regex=第1段で1件ヒット確定 ／ cache=LLM 過去判定の流用 ／ "
+        "llm=今回 LLM 呼出 ／ llm_fallback=LLM 失敗 or 確定術式欠損"
     )
 
 st.divider()
