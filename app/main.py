@@ -30,8 +30,13 @@ from src.ingest import load
 from src.llm_client import LLMClient
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CSV = ROOT / "anonymized_data.csv"
 LLM_CONFIG = ROOT / "config" / "llm_config.yaml"
+
+# 既定 CSV: 匿名化フローの最終出力 (data/raw/anonymized/anonymized_data.csv) が存在すれば優先、
+# なければルート直下のサンプル (anonymized_data.csv) にフォールバック。
+_PIPELINE_OUTPUT = ROOT / "data" / "raw" / "anonymized" / "anonymized_data.csv"
+_ROOT_SAMPLE = ROOT / "anonymized_data.csv"
+DEFAULT_CSV = _PIPELINE_OUTPUT if _PIPELINE_OUTPUT.exists() else _ROOT_SAMPLE
 
 st.set_page_config(page_title="Surgery Dashboard", layout="wide")
 
