@@ -108,9 +108,24 @@ streamlit run app/main.py
 - **申込区分** / **実施診療科** / **全身麻酔のみ** で絞り込み
 - **LLM 第 2 段を適用** チェックで Swallow-8B によるカテゴリ判定の有効化（Ollama 未起動時は自動で regex のみに降格）
 
-### CLI（Phase 2 で追加予定）
+### CLI
 
-`src/cli.py` 経由でのバッチ実行は今後追加。現状は Streamlit と Python REPL から各モジュールを直接利用する想定。
+```bash
+# 1. 生 CSV を匿名化 (data/raw/*.csv → data/raw/anonymized/anonymized_data.csv)
+python -m src.cli anonymize [--dry-run]
+
+# 2. 匿名化済み CSV を読み込み、regex + LLM 第 2 段で分類して parquet 保存
+python -m src.cli classify [--csv PATH] [--no-llm]
+
+# 3. 保存済み parquet からカテゴリ・分類元のサマリを表示
+python -m src.cli summary [--parquet PATH]
+
+# ヘルプ
+python -m src.cli --help
+python -m src.cli <command> --help
+```
+
+`anonymize` は `src/anonymize.py` 単独実行 (`python -m src.anonymize`) でも同等。
 
 ### LLM 第 2 段の挙動
 
