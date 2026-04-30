@@ -36,8 +36,9 @@ htmlcov/
 build/
 dist/
 
-# --- macOS / IDE ---
+# --- macOS / IDE / 個人開発ツール ---
 .DS_Store
 .vscode/
 .idea/
 *.swp
+.claude/
