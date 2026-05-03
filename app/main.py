@@ -23,6 +23,7 @@ from src.aggregate import (
     is_general_anesthesia,
     kpi_overall,
     kpi_per_doctor,
+    kpi_per_doctor_compare,
     monthly_trend,
 )
 from src.classify import classify, load_rules
@@ -110,6 +111,31 @@ departments = st.sidebar.multiselect(
 )
 
 ga_only = st.sidebar.checkbox("全身麻酔のみ", value=False)
+
+# 期間比較（任意機能）
+with st.sidebar.expander("期間比較", expanded=False):
+    enable_compare = st.checkbox("有効化", value=False, key="enable_compare")
+    if enable_compare:
+        date_min = df["手術実施日"].min().date()
+        date_max = df["手術実施日"].max().date()
+        midpoint = date_min + (date_max - date_min) / 2
+        period_a = st.date_input(
+            "期間 A（前期間）",
+            value=(date_min, midpoint),
+            min_value=date_min,
+            max_value=date_max,
+            key="period_a",
+        )
+        period_b = st.date_input(
+            "期間 B（後期間）",
+            value=(midpoint, date_max),
+            min_value=date_min,
+            max_value=date_max,
+            key="period_b",
+        )
+    else:
+        period_a = None
+        period_b = None
 
 # ----- Apply filters -----------------------------------------------------
 
@@ -263,3 +289,44 @@ else:
         )
         st.markdown("**カテゴリ別件数（選択術者）**")
         st.dataframe(cat_d_disp, use_container_width=True, hide_index=True)
+
+# ----- 術者別 KPI 期間比較 ---------------------------------------------
+
+if enable_compare:
+    st.divider()
+    st.subheader(f"術者別 KPI 期間比較 ({operator_mode_label})")
+
+    if (
+        not isinstance(period_a, tuple)
+        or len(period_a) != 2
+        or not isinstance(period_b, tuple)
+        or len(period_b) != 2
+    ):
+        st.info("サイドバーで期間 A・期間 B を範囲指定してください（開始〜終了の 2 点）")
+    else:
+        compare = kpi_per_doctor_compare(df_long, period_a, period_b)
+
+        st.caption(
+            f"期間 A: {period_a[0]} 〜 {period_a[1]} ／ "
+            f"期間 B: {period_b[0]} 〜 {period_b[1]}（両端含む）。"
+            f"件数_B 降順で表示。件数比率(%) は (B/A − 1)×100、A=0 のときは N/A。"
+        )
+
+        # 表示用に整形
+        compare_disp = compare.copy()
+        for col in ("件数比率(%)", "平均手術時間_分_A", "平均手術時間_分_B", "平均時間差_分"):
+            if col in compare_disp.columns:
+                compare_disp[col] = compare_disp[col].astype("Float64").round(1)
+
+        n_show_compare = st.slider(
+            "表示件数",
+            min_value=10,
+            max_value=max(10, len(compare_disp)),
+            value=min(20, len(compare_disp)),
+            key="compare_slider",
+        )
+        st.dataframe(
+            compare_disp.head(n_show_compare),
+            use_container_width=True,
+            hide_index=True,
+        )

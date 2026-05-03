@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
+import pytest
 
 from src.aggregate import (
     CATEGORY_COLUMNS,
@@ -12,6 +15,7 @@ from src.aggregate import (
     is_general_anesthesia,
     kpi_overall,
     kpi_per_doctor,
+    kpi_per_doctor_compare,
     monthly_trend,
 )
 
@@ -194,3 +198,104 @@ def test_category_monthly_trend_no_category_columns():
     out = category_monthly_trend(df)
     assert out.empty
     assert list(out.columns) == ["手術実施月"]
+
+
+# --- kpi_per_doctor_compare --------------------------------------------
+
+
+def _make_long_for_compare():
+    """期間 A (4-5 月)、期間 B (6-7 月) で 3 名の医師の動きを作る。
+
+    医師_001: A=2件 (30,60分) → B=3件 (40,50,60分)。緊急 A=1, B=0。
+    医師_002: A=1件 (90分)   → B=0件
+    医師_003: A=0件          → B=2件 (45,50分)。緊急 B=2
+    """
+    return pd.DataFrame(
+        {
+            "手術実施日": pd.to_datetime(
+                [
+                    "2025-04-15", "2025-05-05",  # 医師_001 A 期 2件
+                    "2025-06-10", "2025-06-25", "2025-07-01",  # 医師_001 B 期 3件
+                    "2025-04-20",  # 医師_002 A 期 1件
+                    "2025-07-15", "2025-07-20",  # 医師_003 B 期 2件
+                ]
+            ),
+            "医師": [
+                "医師_001", "医師_001",
+                "医師_001", "医師_001", "医師_001",
+                "医師_002",
+                "医師_003", "医師_003",
+            ],
+            "予定手術時間": [30, 60, 40, 50, 60, 90, 45, 50],
+            "申込区分": [
+                "緊急", "通常",
+                "通常", "通常", "通常",
+                "通常",
+                "緊急", "緊急",
+            ],
+        }
+    )
+
+
+def test_kpi_per_doctor_compare_basic():
+    out = kpi_per_doctor_compare(
+        _make_long_for_compare(),
+        period_a=(date(2025, 4, 1), date(2025, 5, 31)),
+        period_b=(date(2025, 6, 1), date(2025, 7, 31)),
+    )
+    out_idx = out.set_index("医師")
+
+    # 医師_001
+    a = out_idx.loc["医師_001"]
+    assert a["件数_A"] == 2 and a["件数_B"] == 3
+    assert a["件数差"] == 1
+    assert a["件数比率(%)"] == pytest.approx(50.0)
+    assert a["平均手術時間_分_A"] == pytest.approx(45.0)  # (30+60)/2
+    assert a["平均手術時間_分_B"] == pytest.approx(50.0)  # (40+50+60)/3
+    assert a["平均時間差_分"] == pytest.approx(5.0)
+    assert a["緊急件数_A"] == 1 and a["緊急件数_B"] == 0
+
+    # 医師_002: A 期のみ → B=0、件数比率 -100%、B 平均は NaN
+    b = out_idx.loc["医師_002"]
+    assert b["件数_A"] == 1 and b["件数_B"] == 0
+    assert b["件数差"] == -1
+    assert b["件数比率(%)"] == pytest.approx(-100.0)
+    assert pd.isna(b["平均手術時間_分_B"])
+
+    # 医師_003: B 期のみ → A=0、件数比率は NaN (A=0 ガード)
+    c = out_idx.loc["医師_003"]
+    assert c["件数_A"] == 0 and c["件数_B"] == 2
+    assert c["件数差"] == 2
+    assert pd.isna(c["件数比率(%)"])
+    assert pd.isna(c["平均手術時間_分_A"])
+    assert c["平均手術時間_分_B"] == pytest.approx(47.5)
+    assert c["緊急件数_A"] == 0 and c["緊急件数_B"] == 2
+
+
+def test_kpi_per_doctor_compare_sorted_by_b():
+    out = kpi_per_doctor_compare(
+        _make_long_for_compare(),
+        period_a=(date(2025, 4, 1), date(2025, 5, 31)),
+        period_b=(date(2025, 6, 1), date(2025, 7, 31)),
+    )
+    # B 期降順: 医師_001 (3) > 医師_003 (2) > 医師_002 (0)
+    assert list(out["医師"]) == ["医師_001", "医師_003", "医師_002"]
+
+
+def test_kpi_per_doctor_compare_inclusive_endpoints():
+    """期間端の日付も含まれること。"""
+    df_long = pd.DataFrame(
+        {
+            "手術実施日": pd.to_datetime(["2025-04-01", "2025-04-30"]),
+            "医師": ["医師_001", "医師_001"],
+            "予定手術時間": [30, 60],
+            "申込区分": ["通常", "通常"],
+        }
+    )
+    out = kpi_per_doctor_compare(
+        df_long,
+        period_a=(date(2025, 4, 1), date(2025, 4, 30)),
+        period_b=(date(2025, 5, 1), date(2025, 5, 31)),
+    )
+    a = out.set_index("医師").loc["医師_001"]
+    assert a["件数_A"] == 2 and a["件数_B"] == 0

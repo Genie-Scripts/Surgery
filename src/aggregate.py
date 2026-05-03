@@ -4,16 +4,19 @@
 出力: 各種 KPI の集計値（純関数）
 
 関数構成:
-  - is_general_anesthesia(s):   OQ-5 解決済みの全身麻酔判定
-  - expand_operators(df, mode): 執刀医モード/全術者モードで long-form 化
-  - kpi_overall(df):            全体 KPI（件数/総時間/平均時間/緊急比率）
-  - monthly_trend(df):          月次推移（手術実施日基準）
-  - kpi_per_doctor(df_long):    術者ごとの KPI
-  - category_counts(df):        カテゴリ別件数
+  - is_general_anesthesia(s):           OQ-5 解決済みの全身麻酔判定
+  - expand_operators(df, mode):         執刀医モード/全術者モードで long-form 化
+  - kpi_overall(df):                    全体 KPI（件数/総時間/平均時間/緊急比率）
+  - monthly_trend(df):                  月次推移（手術実施日基準）
+  - kpi_per_doctor(df_long):            術者ごとの KPI
+  - kpi_per_doctor_compare(...):        2 期間の術者別 KPI 比較
+  - category_counts(df):                カテゴリ別件数
+  - category_monthly_trend(df):         カテゴリ × 月次の件数
 """
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Literal
 
 import pandas as pd
@@ -126,6 +129,76 @@ def kpi_per_doctor(df_long: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
         .sort_values("件数", ascending=False, ignore_index=True)
+    )
+
+
+def kpi_per_doctor_compare(
+    df_long: pd.DataFrame,
+    period_a: tuple[date, date],
+    period_b: tuple[date, date],
+    date_column: str = "手術実施日",
+) -> pd.DataFrame:
+    """期間 A と期間 B の術者別 KPI を比較する。
+
+    `df_long` は `expand_operators` の出力を想定。
+    各期間は両端含む `(start, end)` のタプル。
+
+    返却列:
+      - 医師
+      - 件数_A, 件数_B, 件数差 (B - A)
+      - 件数比率(%) ((B/A - 1) * 100、A=0 は NaN)
+      - 平均手術時間_分_A, 平均手術時間_分_B, 平均時間差_分 (B - A)
+      - 緊急件数_A, 緊急件数_B
+    """
+
+    def _slice(start: date, end: date) -> pd.DataFrame:
+        mask = (df_long[date_column] >= pd.Timestamp(start)) & (
+            df_long[date_column] <= pd.Timestamp(end)
+        )
+        return df_long[mask]
+
+    df_a = _slice(*period_a)
+    df_b = _slice(*period_b)
+
+    kpi_a = kpi_per_doctor(df_a).set_index("医師").add_suffix("_A")
+    kpi_b = kpi_per_doctor(df_b).set_index("医師").add_suffix("_B")
+
+    merged = kpi_a.join(kpi_b, how="outer")
+
+    # int 列の NaN は 0 で埋める（その医師は当該期間に手術なし）
+    for col in ("件数_A", "件数_B", "緊急件数_A", "緊急件数_B"):
+        if col in merged.columns:
+            merged[col] = merged[col].fillna(0).astype("int64")
+
+    merged["件数差"] = merged["件数_B"] - merged["件数_A"]
+    # 件数比率: A=0 のときは NaN (新規参入の医師など)
+    merged["件数比率(%)"] = (
+        (merged["件数_B"] / merged["件数_A"].replace(0, pd.NA)) - 1
+    ) * 100
+
+    if "平均手術時間_分_A" in merged.columns and "平均手術時間_分_B" in merged.columns:
+        merged["平均時間差_分"] = (
+            merged["平均手術時間_分_B"] - merged["平均手術時間_分_A"]
+        )
+
+    # 列順を整える（存在する列のみ）
+    column_order = [
+        "件数_A",
+        "件数_B",
+        "件数差",
+        "件数比率(%)",
+        "平均手術時間_分_A",
+        "平均手術時間_分_B",
+        "平均時間差_分",
+        "緊急件数_A",
+        "緊急件数_B",
+    ]
+    ordered = [c for c in column_order if c in merged.columns]
+
+    return (
+        merged[ordered]
+        .sort_values("件数_B", ascending=False, kind="stable")
+        .reset_index()
     )
 
 
