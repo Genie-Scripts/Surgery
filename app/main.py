@@ -18,6 +18,7 @@ import streamlit as st
 
 from src.aggregate import (
     category_counts,
+    category_monthly_trend,
     expand_operators,
     is_general_anesthesia,
     kpi_overall,
@@ -37,6 +38,13 @@ LLM_CONFIG = ROOT / "config" / "llm_config.yaml"
 _PIPELINE_OUTPUT = ROOT / "data" / "raw" / "anonymized" / "anonymized_data.csv"
 _ROOT_SAMPLE = ROOT / "anonymized_data.csv"
 DEFAULT_CSV = _PIPELINE_OUTPUT if _PIPELINE_OUTPUT.exists() else _ROOT_SAMPLE
+
+CATEGORY_LABELS: dict[str, str] = {
+    "malignant_tumor": "悪性腫瘍",
+    "artificial_joint": "人工関節",
+    "robot_assisted_davinci": "ロボット支援(ダヴィンチ系)",
+    "robot_assisted_other": "ロボット支援(非ダヴィンチ系)",
+}
 
 st.set_page_config(page_title="Surgery Dashboard", layout="wide")
 
@@ -143,6 +151,17 @@ else:
     col_a.line_chart(mt_indexed[["件数"]])
     col_b.markdown("**平均手術時間 (分)**")
     col_b.line_chart(mt_indexed[["平均手術時間_分"]])
+
+st.divider()
+st.subheader("カテゴリ別 月次推移")
+
+cat_mt = category_monthly_trend(df_f)
+if cat_mt.empty or len(cat_mt.columns) <= 1:
+    st.info("該当データなし")
+else:
+    cat_mt_disp = cat_mt.set_index("手術実施月").rename(columns=CATEGORY_LABELS)
+    st.line_chart(cat_mt_disp)
+    st.caption("線種ごとに件数推移を表示。フィルタ（執刀医モード／申込区分／診療科／全身麻酔）の影響を受ける。")
 
 st.divider()
 st.subheader("カテゴリ別件数")

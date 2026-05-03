@@ -136,3 +136,18 @@ def category_counts(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             rows.append({"カテゴリ": col, "件数": int(df[col].sum())})
     return pd.DataFrame(rows)
+
+
+def category_monthly_trend(df: pd.DataFrame) -> pd.DataFrame:
+    """カテゴリ別件数の月次集計（手術実施日基準）。
+
+    返却列: `手術実施月` (Timestamp) と、`df` に存在する各カテゴリ ID 列（件数）。
+    `df` が空、もしくはカテゴリ列が 1 つも無いときは `手術実施月` のみの空 DataFrame を返す。
+    """
+    available = [c for c in CATEGORY_COLUMNS if c in df.columns]
+    if df.empty or not available:
+        return pd.DataFrame(columns=["手術実施月", *available])
+
+    g = df.set_index("手術実施日").resample("MS")
+    out = g[available].sum().astype("int64")
+    return out.rename_axis("手術実施月").reset_index()
