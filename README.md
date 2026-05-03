@@ -102,11 +102,22 @@ cp /path/to/anonymized_data.csv data/raw/
 streamlit run app/main.py
 ```
 
-ブラウザで `http://localhost:8501` を開く。サイドバーから:
-- **CSV パス**を指定（デフォルトはルート直下の `anonymized_data.csv`）
+ブラウザで `http://localhost:8501` を開くと、**マルチページ構成**でナビゲーションがサイドバーに表示される:
+
+| ページ | 内容 |
+|---|---|
+| **main** | ランディング: 総件数・期間・執刀医数・診療科数のサマリ + 各ページ案内 |
+| **全体 KPI** | 件数 / 総時間 / 平均時間 / 緊急比率 + 月次推移（件数・平均時間） |
+| **術者別** | 術者ランキング + 特定術者ドリルダウン + 期間比較（サイドバー expander で有効化） |
+| **カテゴリ別** | 4 カテゴリ件数（悪性腫瘍 / 人工関節 / ダヴィンチ系・非ダヴィンチ系ロボット）+ 分類元内訳 + カテゴリ別月次 + カテゴリ × 診療科クロス |
+| **月次推移** | 件数・平均時間・カテゴリ・緊急比率・診療科別 top5 の時系列分析 |
+
+サイドバー共通フィルタ（**ページ切替後も維持**される）:
+- **CSV パス**: デフォルトは `data/raw/anonymized/anonymized_data.csv`（無ければルート直下の `anonymized_data.csv`）
+- **LLM 第 2 段を適用**（Swallow-8B + ハードガード。Ollama 未起動時は自動で regex のみに降格）
 - **執刀医モード**（`執刀医のみ` / `執刀医＋助手を含む`）
 - **申込区分** / **実施診療科** / **全身麻酔のみ** で絞り込み
-- **LLM 第 2 段を適用** チェックで Swallow-8B によるカテゴリ判定の有効化（Ollama 未起動時は自動で regex のみに降格）
+- **期間比較**（expander で展開、術者別ページに比較表が表示）
 
 ### CLI
 
@@ -155,18 +166,20 @@ Surgery/
 ├── pyproject.toml      # 依存と lint 設定
 ├── .gitignore
 │
-├── src/                # ロジック本体
-│   ├── ingest.py       # CSV 読込・文字コード正規化
-│   ├── classify.py     # カテゴリ抽出 (regex + LLM)
-│   ├── aggregate.py    # KPI 集計
-│   ├── llm_client.py   # Ollama クライアント
-│   ├── cli.py          # CLI 統合
-│   └── core/           # KPI / peer_compare / difficulty
+├── src/                # ロジック本体（pip install -e . で `src.*` 名前空間に解決）
+│   ├── ingest.py       # CSV 読込・文字コード正規化（CP932 / UTF-8 自動判別）
+│   ├── classify.py     # カテゴリ抽出 第 1 段（regex + categories.yaml）
+│   ├── classify_llm.py # カテゴリ抽出 第 2 段（LLM + ハードガード + 永続キャッシュ）
+│   ├── aggregate.py    # KPI 集計純関数群
+│   ├── llm_client.py   # Ollama / OpenAI 互換クライアント
+│   ├── anonymize.py    # 生 CSV → 匿名化済み CSV
+│   ├── cli.py          # 統合 CLI（anonymize / classify / summary）
+│   ├── ui/             # Streamlit 共通 UI（data_loader, filters）
+│   └── core/           # 同僚比較 / 難度補正（Phase 2）
 │
-├── app/                # Streamlit
-│   ├── main.py
-│   ├── pages/          # 全体KPI / 術者別 / カテゴリ別 / 月次推移
-│   └── components/
+├── app/                # Streamlit マルチページ エントリ
+│   ├── main.py         # ランディング
+│   └── pages/          # 1_全体KPI / 2_術者別 / 3_カテゴリ別 / 4_月次推移
 │
 ├── config/             # ルール・接続設定
 ├── data/

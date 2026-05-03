@@ -332,12 +332,17 @@ LLM の医療知識による判定は基本的に尊重するが、保険請求�
 | **B. 静的 HTML + GitHub Pages** | 集計結果を静的 HTML レポート化、Pages で配信 | サーバ不要、Outpatient-Dashboard と同パターン | 対話性なし、生成コスト |
 | **C. ハイブリッド** | ローカルは Streamlit、公開は静的 HTML | 用途分離 | 開発工数倍 |
 
-**MVP は B（静的 HTML）から開始** を推奨：
-- Streamlit と HTML の両方を書くほど初期工数を割けない
-- Streamlit はローカル実名版で活用、公開は静的化で安全側に倒す
-- Phase 2 で C に拡張可能
+**現状（2026-05）: Phase 1 で Streamlit ローカル版が稼働中**。
 
-→ ただし MVP は A + B + C + D（D = Streamlit UI）なので、**ローカルは Streamlit、公開はオプション** と整理する。`deploy.sh` は Phase 2 で着手。
+公開層は **C（ハイブリッド）** を採用予定:
+- ローカル実名版: Streamlit (`streamlit run app/main.py`)
+- 公開匿名版: 静的 HTML（次フェーズで実装）
+
+静的 HTML 化の論点（次セッションで確定）:
+- レンダラ: Plotly `fig.write_html()`（依存に既にあり）または Jinja2 + matplotlib
+- 切り出す内容: 全体 KPI / カテゴリ別 / 月次推移（術者別の個別画面は除く可能性 — 公開で誰がどれくらいやっているかは出さない方針か要確認）
+- ホスト: GitHub Pages（`docs/` 配下に push）
+- スクリプト: `scripts/deploy.sh` で `data/aggregated/classified.parquet` → `docs/index.html` を生成 → `git commit && git push` のフロー
 
 ---
 
@@ -352,27 +357,32 @@ Surgery/
 ├── .python-version
 ├── .gitignore                 # data/raw, local/, master_key 等を除外
 │
-├── src/                       # ロジック本体
+├── src/                       # ロジック本体（pip install -e . で `src.*` として import 可能）
 │   ├── __init__.py
-│   ├── ingest.py              # CSV 読み込み・文字コード正規化
-│   ├── classify.py            # カテゴリ抽出（regex + LLM）
-│   ├── aggregate.py           # KPI 集計
-│   ├── llm_client.py          # Ollama / OpenAI 互換クライアント（Outpatient から移植）
-│   ├── cli.py                 # 統合 CLI
-│   └── core/
+│   ├── ingest.py              # CSV 読み込み・文字コード正規化（CP932 / UTF-8 自動判別）
+│   ├── classify.py            # カテゴリ抽出 第 1 段（regex + categories.yaml）
+│   ├── classify_llm.py        # カテゴリ抽出 第 2 段（LLM + ハードガード + 永続キャッシュ）
+│   ├── aggregate.py           # KPI 集計純関数群（kpi_overall / monthly_trend / kpi_per_doctor / kpi_per_doctor_compare / category_monthly_trend 等）
+│   ├── llm_client.py          # Ollama / OpenAI 互換クライアント（Outpatient から移植・簡素化）
+│   ├── anonymize.py           # 生 CSV → 匿名化済み CSV（master_key 永続化、複数ファイル concat）
+│   ├── cli.py                 # 統合 CLI（anonymize / classify / summary）
+│   ├── ui/                    # Streamlit 共通 UI コンポーネント
+│   │   ├── __init__.py
+│   │   ├── data_loader.py     # @st.cache_data load_pipeline + DEFAULT_CSV + CATEGORY_LABELS
+│   │   └── filters.py         # render_sidebar_filters() + render_caption()（session_state でページ間永続化）
+│   └── core/                  # （Phase 2 拡張用）
 │       ├── __init__.py
-│       ├── kpi.py             # KPI 計算純関数
-│       ├── peer_compare.py    # 同僚比較ロジック
+│       ├── peer_compare.py    # 同僚比較ロジック（OQ-3）
 │       └── difficulty.py      # 難度補正（OQ-2）
 │
-├── app/                       # Streamlit エントリ
-│   ├── main.py                # streamlit run app/main.py
-│   ├── pages/
-│   │   ├── 1_全体KPI.py
-│   │   ├── 2_術者別.py
-│   │   ├── 3_カテゴリ別.py
-│   │   └── 4_月次推移.py
-│   └── components/            # 共通ウィジェット
+├── app/                       # Streamlit マルチページエントリ
+│   ├── main.py                # ランディング: streamlit run app/main.py
+│   └── pages/                 # サイドバー nav に自動登録される各ページ
+│       ├── 1_全体KPI.py        # 4 メトリクス + 月次推移 + カテゴリ別件数簡易表
+│       ├── 2_術者別.py         # ランキング + 特定術者ドリルダウン + 期間比較
+│       ├── 3_カテゴリ別.py     # カテゴリ別件数 + 分類元 + カテゴリ別月次 + カテゴリ×診療科
+│       └── 4_月次推移.py       # 件数/平均時間/カテゴリ/緊急比率/診療科別 top5 の時系列分析
+│   #                          # ※ 共通ウィジェットは src/ui/ に配置（pip install -e . で import 可能なため）
 │
 ├── config/
 │   ├── categories.yaml        # カテゴリ抽出ルール
@@ -393,11 +403,12 @@ Surgery/
 │   ├── deploy.sh              # 公開（Phase 2）
 │   └── local_build.sh         # ローカル実名版ビルド
 │
-├── tests/
-│   ├── fixtures/              # 小サンプルCSV
+├── tests/                     # pytest 回帰テスト（純関数中心。UI レイヤーは目視）
+│   ├── fixtures/              # 小サンプル CSV
 │   ├── test_ingest.py
-│   ├── test_classify.py
-│   └── test_aggregate.py
+│   ├── test_classify_llm.py   # _apply_hard_guard / _parse_response / classify_with_llm 等
+│   ├── test_aggregate.py      # KPI 計算 / 期間比較 / カテゴリ月次など
+│   └── test_anonymize.py      # master_key 操作 / バッチ間 ID 安定性 / dry-run など
 │
 └── tools/                     # Phase 2 — ラベリング UI 等
 ```
@@ -420,7 +431,7 @@ Surgery/
 | **OQ-1** | 入力 CSV の **実スキーマ** 確認（列名・型・欠損パターン） | **解決済み（2026-04-30）** §2.1 に確定スキーマを記載。K コード列・退院日・受付日は無し |
 | **OQ-2** | **難度補正** の計算式（K コードベース／手術時間中央値ベース／専門医試験基準 等） | Phase 1 後半。**前提変更**: K コード列が無いためデータ供給元への追加要請または `確定術式` から K コード辞書を自前構築のいずれかが必要 |
 | **OQ-3** | **同僚比較** の対象集合 | Phase 1 中盤。**方針案**: 総件数／総手術時間／ロボット支援は全診療科横断、それ以外は診療科内 |
-| **OQ-4** | **公開方法** 確定（A / B / C from §8.2） | Phase 2 着手時 |
+| **OQ-4** | **公開方法** 確定（A / B / C from §8.2） | **方針確定（2026-05-04）**: C ハイブリッド（ローカル Streamlit + 公開静的 HTML）。実装は Phase 2 で着手 |
 | **OQ-5** | 「**全身麻酔**」の表記ゆれ列挙 | **解決済み（2026-04-30）** §3.3 レイヤー 2 に判定式を記載 |
 | **OQ-6** | **ロボット支援** の判定キーワード | **解決済み（2026-04-30）** ダヴィンチ系（`手術用支援`）と非ダヴィンチ系（`（ロボット）`）の 2 サブカテゴリで確定。§3.2 / §7.1 参照 |
 | **OQ-7** | カテゴリ自動判定の **正解ラベル**（手動ラベリング） 何件確保するか | Phase 1 後半 |
