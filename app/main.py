@@ -202,3 +202,64 @@ per_doc = kpi_per_doctor(df_long)
 
 n_show = st.slider("表示件数", min_value=10, max_value=max(10, len(per_doc)), value=min(20, len(per_doc)))
 st.dataframe(per_doc.head(n_show), use_container_width=True, hide_index=True)
+
+# ----- 特定術者ドリルダウン --------------------------------------------
+
+st.divider()
+st.subheader("特定術者ドリルダウン")
+
+if df_long.empty:
+    st.info("対象術者なし（フィルタを緩めてください）")
+else:
+    doctor_counts = df_long.groupby("医師").size().sort_values(ascending=False)
+    doctor_options = doctor_counts.index.tolist()
+    doctor_labels = {d: f"{d} （{int(n):,} 件）" for d, n in doctor_counts.items()}
+
+    selected_doctor = st.selectbox(
+        "術者",
+        options=doctor_options,
+        format_func=lambda d: doctor_labels[d],
+        help="件数降順。選択した術者に絞り込んで KPI と月次推移を表示します。",
+    )
+
+    df_d = df_long[df_long["医師"] == selected_doctor].copy()
+
+    # 個別 KPI
+    k_d = kpi_overall(df_d)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("件数", f"{k_d['件数']:,}")
+    c2.metric("総手術時間 (時間)", f"{k_d['総手術時間_分'] / 60:,.1f}")
+    c3.metric("平均手術時間 (分)", f"{k_d['平均手術時間_分']:.1f}")
+    c4.metric("緊急比率", f"{k_d['緊急比率'] * 100:.1f}%")
+
+    # 月次推移 と カテゴリ別月次
+    col_left, col_right = st.columns(2)
+
+    mt_d = monthly_trend(df_d)
+    if mt_d.empty:
+        col_left.info("月次推移: データなし")
+    else:
+        col_left.markdown("**件数 月次推移**")
+        col_left.line_chart(mt_d.set_index("手術実施月")[["件数"]])
+
+    cat_mt_d = category_monthly_trend(df_d)
+    if cat_mt_d.empty or len(cat_mt_d.columns) <= 1:
+        col_right.info("カテゴリ別月次: データなし")
+    else:
+        col_right.markdown("**カテゴリ別 月次推移**")
+        col_right.line_chart(
+            cat_mt_d.set_index("手術実施月").rename(columns=CATEGORY_LABELS)
+        )
+
+    # カテゴリ別累計件数
+    cat_d = category_counts(df_d)
+    if not cat_d.empty:
+        cat_d_disp = cat_d.assign(
+            構成比=lambda d: (d["件数"] / max(len(df_d), 1) * 100).round(1)
+        )
+        cat_d_disp.columns = ["カテゴリ", "件数", "構成比 (%)"]
+        cat_d_disp["カテゴリ"] = cat_d_disp["カテゴリ"].map(CATEGORY_LABELS).fillna(
+            cat_d_disp["カテゴリ"]
+        )
+        st.markdown("**カテゴリ別件数（選択術者）**")
+        st.dataframe(cat_d_disp, use_container_width=True, hide_index=True)
