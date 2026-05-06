@@ -10,10 +10,12 @@ import pytest
 from src.aggregate import (
     CATEGORY_COLUMNS,
     category_counts,
+    category_counts_period_compare,
     category_monthly_trend,
     expand_operators,
     is_general_anesthesia,
     kpi_overall,
+    kpi_overall_period_compare,
     kpi_per_doctor,
     kpi_per_doctor_compare,
     monthly_trend,
@@ -299,3 +301,91 @@ def test_kpi_per_doctor_compare_inclusive_endpoints():
     )
     a = out.set_index("医師").loc["医師_001"]
     assert a["件数_A"] == 2 and a["件数_B"] == 0
+
+
+# --- kpi_overall_period_compare / category_counts_period_compare ---------
+
+
+def _make_period_compare_df():
+    """期間 A (1-2 月) で 3 件、期間 B (3-4 月) で 4 件、緊急混在のサンプル。"""
+    return pd.DataFrame(
+        {
+            "手術実施日": pd.to_datetime(
+                [
+                    "2025-01-15", "2025-02-10", "2025-02-25",  # 期間 A: 3 件
+                    "2025-03-05", "2025-03-20", "2025-04-08", "2025-04-30",  # 期間 B: 4 件
+                ]
+            ),
+            "予定手術時間": [60, 90, 120, 30, 60, 90, 120],
+            "申込区分": ["通常", "緊急", "通常", "通常", "通常", "緊急", "緊急"],
+            "malignant_tumor": [True, False, True, True, True, False, False],
+            "artificial_joint": [False, True, False, False, False, True, True],
+            "robot_assisted_davinci": [False, False, False, False, False, False, False],
+            "robot_assisted_other": [False, False, False, False, False, False, False],
+        }
+    )
+
+
+def test_kpi_overall_period_compare_diff_is_b_minus_a():
+    df = _make_period_compare_df()
+    out = kpi_overall_period_compare(
+        df,
+        period_a=(date(2025, 1, 1), date(2025, 2, 28)),
+        period_b=(date(2025, 3, 1), date(2025, 4, 30)),
+    )
+    a, b, diff = out["A"], out["B"], out["diff"]
+
+    assert a["件数"] == 3 and b["件数"] == 4
+    assert a["総手術時間_分"] == 270 and b["総手術時間_分"] == 300
+    # A 緊急 1/3, B 緊急 2/4
+    assert a["緊急比率"] == pytest.approx(1 / 3)
+    assert b["緊急比率"] == pytest.approx(0.5)
+    # diff = B - A
+    assert diff["件数"] == 1
+    assert diff["総手術時間_分"] == 30
+
+
+def test_kpi_overall_period_compare_empty_periods_handled():
+    df = _make_period_compare_df()
+    out = kpi_overall_period_compare(
+        df,
+        period_a=(date(2024, 1, 1), date(2024, 12, 31)),  # データなし
+        period_b=(date(2025, 1, 1), date(2025, 4, 30)),
+    )
+    assert out["A"]["件数"] == 0
+    assert out["A"]["緊急比率"] == 0.0  # n=0 ガード
+    assert out["B"]["件数"] == 7
+    assert out["diff"]["件数"] == 7
+
+
+def test_category_counts_period_compare_per_category_diff():
+    df = _make_period_compare_df()
+    out = category_counts_period_compare(
+        df,
+        period_a=(date(2025, 1, 1), date(2025, 2, 28)),
+        period_b=(date(2025, 3, 1), date(2025, 4, 30)),
+    ).set_index("カテゴリ")
+
+    # 悪性腫瘍: A=2 (1/15, 2/25), B=2 (3/5, 3/20) → diff 0
+    assert out.loc["malignant_tumor", "件数_A"] == 2
+    assert out.loc["malignant_tumor", "件数_B"] == 2
+    assert out.loc["malignant_tumor", "件数差"] == 0
+    # 人工関節: A=1 (2/10), B=2 (4/8, 4/30) → diff +1
+    assert out.loc["artificial_joint", "件数_A"] == 1
+    assert out.loc["artificial_joint", "件数_B"] == 2
+    assert out.loc["artificial_joint", "件数差"] == 1
+    # 全 0 のカテゴリも欠落せず行が含まれる
+    assert out.loc["robot_assisted_davinci", "件数_A"] == 0
+    assert out.loc["robot_assisted_davinci", "件数_B"] == 0
+
+
+def test_category_counts_period_compare_inclusive_endpoints():
+    """期間端の日付（1/1, 2/28）も含まれること。"""
+    df = _make_period_compare_df()
+    out = category_counts_period_compare(
+        df,
+        period_a=(date(2025, 1, 15), date(2025, 2, 25)),  # 端 = サンプル日付
+        period_b=(date(2025, 4, 30), date(2025, 4, 30)),
+    ).set_index("カテゴリ")
+    assert out.loc["malignant_tumor", "件数_A"] == 2  # 1/15 と 2/25 の両端含む
+    assert out.loc["artificial_joint", "件数_B"] == 1  # 4/30 ピンポイント

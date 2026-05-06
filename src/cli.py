@@ -4,11 +4,13 @@
   anonymize    生 data/raw/*.csv を匿名化して data/raw/anonymized/ に出力
   classify     匿名化済み CSV を読み込み、regex + LLM 第 2 段で分類して parquet 保存
   summary      classify 結果のカテゴリ別件数を表示
+  export-html  公開用静的 HTML ダッシュボードを書き出す（spec §8.2）
 
 実行:
   python -m src.cli anonymize [--dry-run]
   python -m src.cli classify  [--csv PATH] [--no-llm]
   python -m src.cli summary   [--parquet PATH]
+  python -m src.cli export-html [--parquet PATH] [--output PATH]
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -33,6 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CSV = ROOT / "anonymized_data.csv"
 DEFAULT_LLM_CONFIG = ROOT / "config" / "llm_config.yaml"
 DEFAULT_OUTPUT_PARQUET = ROOT / "data" / "aggregated" / "classified.parquet"
+DEFAULT_HTML_OUTPUT = ROOT / "docs" / "index.html"
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -97,6 +101,63 @@ def _cmd_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_period_arg(spec: str) -> tuple[date, date]:
+    """`YYYY-MM-DD..YYYY-MM-DD` を `(date, date)` に変換する。"""
+    try:
+        start_str, end_str = spec.split("..", 1)
+        start = date.fromisoformat(start_str.strip())
+        end = date.fromisoformat(end_str.strip())
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"期間指定の形式が不正です（'YYYY-MM-DD..YYYY-MM-DD' 形式）: {spec!r}"
+        ) from exc
+    if start > end:
+        raise argparse.ArgumentTypeError(f"start > end になっています: {spec!r}")
+    return (start, end)
+
+
+def _cmd_export_html(args: argparse.Namespace) -> int:
+    # import は呼び出し時のみ（plotly のロードを後回しにする）
+    from src.export_html import PeriodPair, derive_default_periods, export
+
+    pq = Path(args.parquet)
+    if not pq.exists():
+        logger.error(
+            "parquet が見つかりません: %s （先に classify を実行してください）", pq
+        )
+        return 1
+
+    periods = None
+    if args.period_a or args.period_b or args.period_c:
+        df = pd.read_parquet(pq)
+        defaults = {p.key: p for p in derive_default_periods(df)}
+
+        def _override(key: str, label: str, override: str | None) -> PeriodPair:
+            if not override:
+                return defaults[key]
+            try:
+                older_str, newer_str = override.split("/", 1)
+            except ValueError as exc:
+                raise SystemExit(
+                    f"--period-{key.lower()} は 'OLDER/NEWER' 形式 "
+                    f"（例 2025-01-01..2025-03-31/2025-04-01..2025-06-30）"
+                ) from exc
+            older = _parse_period_arg(older_str)
+            newer = _parse_period_arg(newer_str)
+            return PeriodPair(key=key, label=label, older=older, newer=newer)
+
+        periods = [
+            _override("A", "最新 3 ヶ月 vs 前 3 ヶ月", args.period_a),
+            _override("B", "最新 1 ヶ月 vs 前年同月", args.period_b),
+            _override("C", "直近 6 ヶ月 vs 前 6 ヶ月", args.period_c),
+        ]
+
+    out = Path(args.output)
+    written = export(pq, out, periods)
+    logger.info("出力: %s (%s bytes)", written, written.stat().st_size)
+    return 0
+
+
 def _cmd_anonymize(args: argparse.Namespace) -> int:
     # anonymize はそれ自身に CLI を持つので、引数を組み立てて委譲する
     forwarded: list[str] = []
@@ -127,6 +188,20 @@ def main(argv: list[str] | None = None) -> int:
     p_sum = sub.add_parser("summary", help="classify の出力 parquet からサマリ表示")
     p_sum.add_argument("--parquet", default=str(DEFAULT_OUTPUT_PARQUET))
     p_sum.set_defaults(func=_cmd_summary)
+
+    p_exp = sub.add_parser("export-html", help="公開用静的 HTML を docs/ に書き出す")
+    p_exp.add_argument(
+        "--parquet", default=str(DEFAULT_OUTPUT_PARQUET), help="入力 parquet（classify の出力）"
+    )
+    p_exp.add_argument("--output", default=str(DEFAULT_HTML_OUTPUT), help="出力 HTML パス")
+    p_exp.add_argument(
+        "--period-a",
+        default=None,
+        help="期間 A を上書き: 'OLDER/NEWER'（例 2025-11-01..2026-01-31/2026-02-01..2026-04-30）",
+    )
+    p_exp.add_argument("--period-b", default=None, help="期間 B 上書き（書式は --period-a と同じ）")
+    p_exp.add_argument("--period-c", default=None, help="期間 C 上書き（書式は --period-a と同じ）")
+    p_exp.set_defaults(func=_cmd_export_html)
 
     args = parser.parse_args(argv)
 

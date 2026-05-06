@@ -10,7 +10,9 @@
   - monthly_trend(df):                  月次推移（手術実施日基準）
   - kpi_per_doctor(df_long):            術者ごとの KPI
   - kpi_per_doctor_compare(...):        2 期間の術者別 KPI 比較
+  - kpi_overall_period_compare(...):    2 期間の全体 KPI 比較
   - category_counts(df):                カテゴリ別件数
+  - category_counts_period_compare(...):2 期間のカテゴリ別件数比較
   - category_monthly_trend(df):         カテゴリ × 月次の件数
 """
 
@@ -202,6 +204,30 @@ def kpi_per_doctor_compare(
     )
 
 
+def kpi_overall_period_compare(
+    df: pd.DataFrame,
+    period_a: tuple[date, date],
+    period_b: tuple[date, date],
+    date_column: str = "手術実施日",
+) -> dict[str, dict[str, float | int]]:
+    """期間 A と期間 B の全体 KPI を比較する。
+
+    各期間は両端含む `(start, end)` のタプル。
+    返却辞書: `{"A": kpi_overall(...), "B": kpi_overall(...), "diff": {k: B-A for k}}`。
+    """
+
+    def _slice(start: date, end: date) -> pd.DataFrame:
+        mask = (df[date_column] >= pd.Timestamp(start)) & (
+            df[date_column] <= pd.Timestamp(end)
+        )
+        return df[mask]
+
+    a = kpi_overall(_slice(*period_a))
+    b = kpi_overall(_slice(*period_b))
+    diff = {k: b[k] - a[k] for k in a}
+    return {"A": a, "B": b, "diff": diff}
+
+
 def category_counts(df: pd.DataFrame) -> pd.DataFrame:
     """カテゴリ列ごとの件数（True 件数）。"""
     rows = []
@@ -209,6 +235,36 @@ def category_counts(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             rows.append({"カテゴリ": col, "件数": int(df[col].sum())})
     return pd.DataFrame(rows)
+
+
+def category_counts_period_compare(
+    df: pd.DataFrame,
+    period_a: tuple[date, date],
+    period_b: tuple[date, date],
+    date_column: str = "手術実施日",
+) -> pd.DataFrame:
+    """期間 A と期間 B のカテゴリ別件数を比較する。
+
+    返却列: `カテゴリ`, `件数_A`, `件数_B`, `件数差` (B - A)。
+    両期間でいずれのカテゴリも 0 件のときは行を含む（カテゴリ列が `df` に存在する限り）。
+    """
+
+    def _slice(start: date, end: date) -> pd.DataFrame:
+        mask = (df[date_column] >= pd.Timestamp(start)) & (
+            df[date_column] <= pd.Timestamp(end)
+        )
+        return df[mask]
+
+    a = category_counts(_slice(*period_a)).rename(columns={"件数": "件数_A"})
+    b = category_counts(_slice(*period_b)).rename(columns={"件数": "件数_B"})
+    if a.empty and b.empty:
+        return pd.DataFrame(columns=["カテゴリ", "件数_A", "件数_B", "件数差"])
+
+    merged = a.merge(b, on="カテゴリ", how="outer").fillna(0)
+    merged["件数_A"] = merged["件数_A"].astype("int64")
+    merged["件数_B"] = merged["件数_B"].astype("int64")
+    merged["件数差"] = merged["件数_B"] - merged["件数_A"]
+    return merged
 
 
 def category_monthly_trend(df: pd.DataFrame) -> pd.DataFrame:
