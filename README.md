@@ -131,12 +131,29 @@ python -m src.cli classify [--csv PATH] [--no-llm]
 # 3. 保存済み parquet からカテゴリ・分類元のサマリを表示
 python -m src.cli summary [--parquet PATH]
 
+# 4. 公開用静的 HTML を docs/ に書き出す（GitHub Pages 配信用）
+python -m src.cli export-html [--parquet PATH] [--output PATH] \
+                              [--period-{a,b,c} 'OLDER/NEWER']
+
 # ヘルプ
 python -m src.cli --help
 python -m src.cli <command> --help
 ```
 
 `anonymize` は `src/anonymize.py` 単独実行 (`python -m src.anonymize`) でも同等。
+
+### 公開フロー（機能 4 / spec §8.2 C ハイブリッド）
+
+`scripts/deploy.sh` がデータ更新フロー（anonymize → classify → export-html）を一括実行する。
+
+```bash
+./scripts/deploy.sh                  # 標準フロー
+./scripts/deploy.sh --skip-anonymize # 既存 anonymized_data.csv を流用
+./scripts/deploy.sh --no-llm         # LLM 第 2 段をスキップ（regex のみ）
+./scripts/deploy.sh --dry-run        # anonymize はドライラン
+```
+
+出力 `docs/index.html` は単一ファイルの Plotly ダッシュボード（術者軸非表示、A/B/C 3 期間比較トグル付き）。`git add docs/ && commit && push` は **意図的に手動** にしている（生成内容をブラウザで確認してから公開する運用）。GitHub Pages は repo Settings → Pages で「Branch: main / Folder: `/docs`」を選択。
 
 ### LLM 第 2 段の挙動
 
@@ -173,7 +190,8 @@ Surgery/
 │   ├── aggregate.py    # KPI 集計純関数群
 │   ├── llm_client.py   # Ollama / OpenAI 互換クライアント
 │   ├── anonymize.py    # 生 CSV → 匿名化済み CSV
-│   ├── cli.py          # 統合 CLI（anonymize / classify / summary）
+│   ├── cli.py          # 統合 CLI（anonymize / classify / summary / export-html）
+│   ├── export_html.py  # 公開用静的 HTML 生成（Plotly + 3 期間比較トグル）
 │   ├── ui/             # Streamlit 共通 UI（data_loader, filters）
 │   └── core/           # 同僚比較 / 難度補正（Phase 2）
 │
@@ -188,9 +206,9 @@ Surgery/
 │   ├── aggregated/
 │   └── llm_cache/
 │
-├── docs/               # 公開用静的HTML（Phase 2）
+├── docs/               # 公開用静的HTML（GitHub Pages 配信先 / 機能 4）
 ├── local/              # ローカル実名版出力 ※Gitコミット禁止
-├── scripts/            # pull.sh / deploy.sh / local_build.sh
+├── scripts/            # deploy.sh（anonymize → classify → export-html）
 ├── tests/              # pytest
 └── tools/              # ラベリングUI 等（Phase 2）
 ```
