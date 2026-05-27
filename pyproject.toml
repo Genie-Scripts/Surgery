@@ -9,6 +9,8 @@ dependencies = [
     "numpy>=1.24",
     "streamlit>=1.30",
     "plotly>=5.20",
+    "weasyprint>=62",
+    "kaleido>=0.2.1",
 ]
 
 [project.optional-dependencies]

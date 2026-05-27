@@ -13,12 +13,20 @@ from src.aggregate import (
     category_counts_period_compare,
     category_monthly_trend,
     expand_operators,
+    fiscal_year_periods,
     is_general_anesthesia,
     kpi_overall,
     kpi_overall_period_compare,
+    kpi_overall_yoy,
     kpi_per_doctor,
     kpi_per_doctor_compare,
+    kpi_per_doctor_yoy,
+    month_end_cutoff,
+    monthly_count_by_fiscal_year,
     monthly_trend,
+    top_n_postop_diagnoses,
+    top_n_procedures,
+    weekly_general_anesthesia,
 )
 
 # --- is_general_anesthesia ----------------------------------------------
@@ -389,3 +397,236 @@ def test_category_counts_period_compare_inclusive_endpoints():
     ).set_index("カテゴリ")
     assert out.loc["malignant_tumor", "件数_A"] == 2  # 1/15 と 2/25 の両端含む
     assert out.loc["artificial_joint", "件数_B"] == 1  # 4/30 ピンポイント
+
+
+# --- PDF レポート向け（月締め・対前年同期） ------------------------------
+
+
+def test_month_end_cutoff_mid_month():
+    assert month_end_cutoff(date(2026, 5, 27)) == date(2026, 4, 30)
+
+
+def test_month_end_cutoff_first_day():
+    assert month_end_cutoff(date(2026, 5, 1)) == date(2026, 4, 30)
+
+
+def test_month_end_cutoff_last_day():
+    assert month_end_cutoff(date(2026, 5, 31)) == date(2026, 4, 30)
+
+
+def test_month_end_cutoff_january_returns_prev_year():
+    assert month_end_cutoff(date(2026, 1, 15)) == date(2025, 12, 31)
+
+
+def test_fiscal_year_periods_mid_fy():
+    """5/27 の場合: FY=2026, cutoff=4/30, YTD=4/1〜4/30, 昨年=2025/4/1〜2025/4/30。"""
+    p = fiscal_year_periods(date(2026, 5, 27))
+    assert p.fiscal_year == 2026
+    assert p.cutoff == date(2026, 4, 30)
+    assert p.ytd == (date(2026, 4, 1), date(2026, 4, 30))
+    assert p.last_year == (date(2025, 4, 1), date(2025, 4, 30))
+
+
+def test_fiscal_year_periods_january_belongs_to_prev_fy():
+    """1〜3 月の cutoff は前年度に属する。"""
+    p = fiscal_year_periods(date(2026, 2, 15))
+    # cutoff = 1/31, FY = 2025
+    assert p.cutoff == date(2026, 1, 31)
+    assert p.fiscal_year == 2025
+    assert p.ytd == (date(2025, 4, 1), date(2026, 1, 31))
+    assert p.last_year == (date(2024, 4, 1), date(2025, 1, 31))
+
+
+def test_fiscal_year_periods_leap_day_safe():
+    """2/29 cutoff の前年は 2/28 に丸める。"""
+    p = fiscal_year_periods(date(2024, 3, 15))
+    # cutoff = 2024/2/29
+    assert p.cutoff == date(2024, 2, 29)
+    assert p.last_year[1] == date(2023, 2, 28)
+
+
+def _make_yoy_df():
+    """1 診療科想定で 2025-04〜2026-04 にデータを散らした DataFrame。"""
+    rows = []
+    # 今年度 (2026-04) に 3 件、うち 2 件は全麻
+    rows += [
+        {
+            "手術実施日": pd.Timestamp("2026-04-10"),
+            "予定手術時間": 120,
+            "申込区分": "通常",
+            "麻酔種別": "全身麻酔(20分以上：吸入もしくは静脈麻酔薬)",
+            "実施術者": "医A",
+            "執刀医": "医A",
+            "助手リスト": [],
+            "確定術式": "術式X",
+            "術後病名": "病名X",
+            "malignant_tumor": True,
+            "artificial_joint": False,
+            "robot_assisted_davinci": False,
+            "robot_assisted_other": False,
+        },
+        {
+            "手術実施日": pd.Timestamp("2026-04-15"),
+            "予定手術時間": 180,
+            "申込区分": "緊急",
+            "麻酔種別": "全身麻酔 20分以上",
+            "実施術者": "医B",
+            "執刀医": "医B",
+            "助手リスト": ["医A"],
+            "確定術式": "術式Y",
+            "術後病名": "病名Y",
+            "malignant_tumor": False,
+            "artificial_joint": True,
+            "robot_assisted_davinci": False,
+            "robot_assisted_other": False,
+        },
+        {
+            "手術実施日": pd.Timestamp("2026-04-22"),
+            "予定手術時間": 90,
+            "申込区分": "通常",
+            "麻酔種別": "局所麻酔",
+            "実施術者": "医A",
+            "執刀医": "医A",
+            "助手リスト": [],
+            "確定術式": "術式X",
+            "術後病名": "病名X",
+            "malignant_tumor": True,
+            "artificial_joint": False,
+            "robot_assisted_davinci": False,
+            "robot_assisted_other": False,
+        },
+    ]
+    # 昨年同期 (2025-04) に 2 件、うち 1 件全麻
+    rows += [
+        {
+            "手術実施日": pd.Timestamp("2025-04-12"),
+            "予定手術時間": 150,
+            "申込区分": "通常",
+            "麻酔種別": "全身麻酔(20分以上：吸入もしくは静脈麻酔薬)",
+            "実施術者": "医A",
+            "執刀医": "医A",
+            "助手リスト": [],
+            "確定術式": "術式X",
+            "術後病名": "病名X",
+            "malignant_tumor": False,
+            "artificial_joint": True,
+            "robot_assisted_davinci": False,
+            "robot_assisted_other": False,
+        },
+        {
+            "手術実施日": pd.Timestamp("2025-04-20"),
+            "予定手術時間": 60,
+            "申込区分": "通常",
+            "麻酔種別": "局所麻酔",
+            "実施術者": "医B",
+            "執刀医": "医B",
+            "助手リスト": [],
+            "確定術式": "術式Z",
+            "術後病名": "病名Z",
+            "malignant_tumor": False,
+            "artificial_joint": False,
+            "robot_assisted_davinci": False,
+            "robot_assisted_other": False,
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def test_kpi_overall_yoy_basic():
+    df = _make_yoy_df()
+    p = fiscal_year_periods(date(2026, 5, 27))
+    k = kpi_overall_yoy(df, p)
+    assert k["ytd"]["件数"] == 3
+    assert k["ytd"]["全麻手術件数"] == 2
+    assert k["ytd"]["緊急比率"] == pytest.approx(1 / 3)
+    assert k["last_year"]["件数"] == 2
+    assert k["last_year"]["全麻手術件数"] == 1
+    assert k["diff"]["件数"] == 1
+    assert k["diff"]["全麻手術件数"] == 1
+
+
+def test_monthly_count_by_fiscal_year_all_12_months_present():
+    df = _make_yoy_df()
+    p = fiscal_year_periods(date(2026, 5, 27))
+    out = monthly_count_by_fiscal_year(df, p)
+    assert len(out) == 12
+    # 4 月 (オフセット 0) のみ件数あり
+    apr = out[out["月オフセット"] == 0].iloc[0]
+    assert apr["今年度件数"] == 3
+    assert apr["昨年度件数"] == 2
+    # 他の月は 0
+    others = out[out["月オフセット"] != 0]
+    assert (others["今年度件数"] == 0).all()
+    assert (others["昨年度件数"] == 0).all()
+
+
+def test_weekly_general_anesthesia_with_target():
+    df = _make_yoy_df()
+    p = fiscal_year_periods(date(2026, 5, 27))
+    wk = weekly_general_anesthesia(df, p.ytd, target=1)
+    # 4/1〜4/30 を含む全週が出る（4 月の月曜は 6/13/20/27 と 3/30）
+    assert not wk.empty
+    assert "達成" in wk.columns
+    # 全麻 2 件 (4/10 木, 4/15 水) → 4/6 週と 4/13 週 がそれぞれ 1 件
+    total_ga = wk["全麻件数"].sum()
+    assert total_ga == 2
+    # target=1 で達成週が 2 週ある
+    assert wk["達成"].sum() == 2
+
+
+def test_weekly_general_anesthesia_no_target():
+    df = _make_yoy_df()
+    p = fiscal_year_periods(date(2026, 5, 27))
+    wk = weekly_general_anesthesia(df, p.ytd, target=None)
+    assert "達成" not in wk.columns
+    assert "目標" not in wk.columns
+
+
+def test_top_n_procedures_with_yoy():
+    df = _make_yoy_df()
+    p = fiscal_year_periods(date(2026, 5, 27))
+    out = top_n_procedures(df, p, n=5)
+    # 今年度: 術式X=2, 術式Y=1 / 昨年同期: 術式X=1, 術式Z=1
+    out_by = out.set_index("確定術式")
+    assert out_by.loc["術式X", "今年度件数"] == 2
+    assert out_by.loc["術式X", "昨年同期件数"] == 1
+    assert out_by.loc["術式X", "差分"] == 1
+    assert out_by.loc["術式Y", "今年度件数"] == 1
+    assert out_by.loc["術式Y", "昨年同期件数"] == 0
+
+
+def test_top_n_postop_diagnoses_with_yoy():
+    df = _make_yoy_df()
+    p = fiscal_year_periods(date(2026, 5, 27))
+    out = top_n_postop_diagnoses(df, p, n=5)
+    out_by = out.set_index("術後病名")
+    assert out_by.loc["病名X", "今年度件数"] == 2
+
+
+def test_kpi_per_doctor_yoy_lead_only():
+    df = _make_yoy_df()
+    p = fiscal_year_periods(date(2026, 5, 27))
+    out = kpi_per_doctor_yoy(df, p, mode="lead_only", top_n=10)
+    assert list(out.columns) == [
+        "順位", "医師", "今年度件数", "昨年同期件数", "差分", "平均時間_分", "緊急件数",
+    ]
+    by = out.set_index("医師")
+    # 今年度: 医A=2(術式X×2), 医B=1
+    assert by.loc["医A", "今年度件数"] == 2
+    assert by.loc["医A", "昨年同期件数"] == 1
+    assert by.loc["医B", "今年度件数"] == 1
+    assert by.loc["医B", "緊急件数"] == 1
+
+
+def test_kpi_per_doctor_yoy_all_includes_assistants():
+    df = _make_yoy_df()
+    p = fiscal_year_periods(date(2026, 5, 27))
+    out = kpi_per_doctor_yoy(df, p, mode="all", top_n=10)
+    assert list(out.columns) == [
+        "順位", "医師", "今年執刀", "今年助手", "今年合計", "昨年合計", "差分",
+    ]
+    by = out.set_index("医師")
+    # 医A: 執刀 2 件 + 助手 1 件 = 合計 3
+    assert by.loc["医A", "今年執刀"] == 2
+    assert by.loc["医A", "今年助手"] == 1
+    assert by.loc["医A", "今年合計"] == 3

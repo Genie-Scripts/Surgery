@@ -135,10 +135,48 @@ python -m src.cli summary [--parquet PATH]
 python -m src.cli export-html [--parquet PATH] [--output PATH] \
                               [--period-{a,b,c} 'OLDER/NEWER']
 
+# 5. 診療科別 PDF レポート（実名版、ローカル限り取扱）
+python -m src.cli export-pdf [--parquet PATH] [--output-dir DIR] \
+                             [--dept 整形外科] [--targets config/department_targets.yaml]
+
 # ヘルプ
 python -m src.cli --help
 python -m src.cli <command> --help
 ```
+
+### 診療科別 PDF レポート（実名版）
+
+`export-pdf` は実名版 `classified.parquet` を入力に、診療科ごとに 4 ページ A4 縦の PDF を `local/reports/YYYYMMDD/` 配下に書き出す（`local/` は `.gitignore` 対象）。レイアウトは以下:
+
+- **p1 サマリ**: 4 KPI（件数 / 平均手術時間 / 緊急比率 / 全麻手術件数）を「今年度 YTD vs 昨年同期」で対比 ＋ 月次推移 2 系列（件数・平均手術時間）
+- **p2 全麻手術件数 vs 目標**: 週次バー（達成週=青／未達=グレー、目標横線）＋ 月次 2 系列
+- **p3 術者ランキング**: 執刀医のみ top20 ／ 執刀＋助手 top20、いずれも昨年同期件数併記
+- **p4 カテゴリ・術式**: 4 カテゴリ件数（今年度 vs 昨年同期）＋ カテゴリ別月次 2x2 ＋ 主要術式 top10 ＋ 主要術後病名 top10
+
+集計は **月締め**（集計終端 = 当日の前月末日）、年度は 4 月開始。件数 < 30 の診療科は出力しない。
+
+目標値（週あたり全麻手術件数）は `config/department_targets.yaml` に診療科ごとに設定する。未設定の科は週次グラフで目標横線・達成率を表示せず実績のみ描画する。
+
+#### 全科一括スクリプト
+
+```bash
+./scripts/all.sh                        # 実名版 data/raw/ → classify → 全科 PDF
+./scripts/all.sh --skip-classify        # 既存 classified_realname.parquet を流用
+./scripts/all.sh --no-llm               # LLM 第 2 段をスキップ
+./scripts/all.sh --dept 整形外科        # 特定科のみ
+```
+
+`scripts/all.sh` は `data/raw/*.csv` を `--csv-dir` で `classify` に渡し、実名 parquet (`data/aggregated/classified_realname.parquet`、`.gitignore` 対象) を経由して `local/reports/YYYYMMDD/` に PDF を書き出す。公開用の `classified.parquet` とはファイルを分けているので、`export-html` の出力には影響しない。
+
+#### 前提 native 依存
+
+PDF レンダリングは WeasyPrint を使用するため Mac では以下の Homebrew パッケージが必要:
+
+```bash
+brew install pango  # cairo / harfbuzz / glib なども一緒に入る
+```
+
+PNG 化には `kaleido` を使用（pip 経由でインストール、追加 native 依存なし）。
 
 `anonymize` は `src/anonymize.py` 単独実行 (`python -m src.anonymize`) でも同等。
 

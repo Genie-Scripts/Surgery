@@ -5,12 +5,14 @@
   classify     匿名化済み CSV を読み込み、regex + LLM 第 2 段で分類して parquet 保存
   summary      classify 結果のカテゴリ別件数を表示
   export-html  公開用静的 HTML ダッシュボードを書き出す（spec §8.2）
+  export-pdf   診療科別 PDF レポートを local/reports/ に書き出す（実名版）
 
 実行:
   python -m src.cli anonymize [--dry-run]
   python -m src.cli classify  [--csv PATH] [--no-llm]
   python -m src.cli summary   [--parquet PATH]
   python -m src.cli export-html [--parquet PATH] [--output PATH]
+  python -m src.cli export-pdf  [--parquet PATH] [--output-dir DIR] [--dept NAME]
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from src.aggregate import category_counts
 from src.anonymize import main as anonymize_main
 from src.classify import classify, load_rules
 from src.classify_llm import classify_with_llm
-from src.ingest import load
+from src.ingest import load, load_directory
 from src.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,8 @@ DEFAULT_CSV = ROOT / "anonymized_data.csv"
 DEFAULT_LLM_CONFIG = ROOT / "config" / "llm_config.yaml"
 DEFAULT_OUTPUT_PARQUET = ROOT / "data" / "aggregated" / "classified.parquet"
 DEFAULT_HTML_OUTPUT = ROOT / "docs" / "index.html"
+DEFAULT_DEPT_TARGETS = ROOT / "config" / "department_targets.yaml"
+DEFAULT_PDF_OUTPUT_DIR = ROOT / "local" / "reports"
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -45,16 +49,28 @@ def _setup_logging(verbose: bool = False) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    # kaleido / choreographer は INFO が冗長すぎるので WARNING に下げる
+    if not verbose:
+        for name in ("kaleido", "choreographer", "fontTools", "weasyprint"):
+            logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def _cmd_classify(args: argparse.Namespace) -> int:
-    csv = Path(args.csv)
-    if not csv.exists():
-        logger.error("CSV が見つかりません: %s", csv)
-        return 1
+    if args.csv_dir:
+        csv_dir = Path(args.csv_dir)
+        if not csv_dir.is_dir():
+            logger.error("CSV ディレクトリが見つかりません: %s", csv_dir)
+            return 1
+        logger.info("読込ディレクトリ: %s", csv_dir)
+        df = load_directory(csv_dir)
+    else:
+        csv = Path(args.csv)
+        if not csv.exists():
+            logger.error("CSV が見つかりません: %s", csv)
+            return 1
+        logger.info("読込: %s", csv)
+        df = load(csv)
 
-    logger.info("読込: %s", csv)
-    df = load(csv)
     df = classify(df)
     logger.info("regex 第 1 段: 全 %d 件 / LLM 判定要 %d 件", len(df), df["LLM判定要"].sum())
 
@@ -158,6 +174,48 @@ def _cmd_export_html(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_export_pdf(args: argparse.Namespace) -> int:
+    # import は呼び出し時のみ（weasyprint / kaleido のロードを後回しにする）
+    from src.export_pdf import export_all
+
+    pq = Path(args.parquet)
+    if not pq.exists():
+        logger.error(
+            "parquet が見つかりません: %s （先に classify を実行してください）", pq
+        )
+        return 1
+
+    targets_path = Path(args.targets)
+    if not targets_path.exists():
+        logger.warning(
+            "目標値ファイルが見つかりません: %s（全診療科で目標未設定として描画します）",
+            targets_path,
+        )
+
+    # 出力先: --output-dir 未指定なら local/reports/YYYYMMDD/
+    today = date.today()
+    if args.output_dir:
+        out_dir = Path(args.output_dir)
+    else:
+        out_dir = DEFAULT_PDF_OUTPUT_DIR / today.strftime("%Y%m%d")
+
+    written = export_all(
+        parquet_path=pq,
+        output_dir=out_dir,
+        targets_path=targets_path,
+        today=today,
+        only_dept=args.dept,
+        min_cases=args.min_cases,
+    )
+
+    print()
+    print(f"=== 出力先: {out_dir} ===")
+    print(f"生成 PDF: {len(written)} ファイル（件数 < {args.min_cases} の診療科は skip）")
+    for p in written:
+        print(f"  {p.name}  ({p.stat().st_size / 1024:.0f} KB)")
+    return 0 if written else 1
+
+
 def _cmd_anonymize(args: argparse.Namespace) -> int:
     # anonymize はそれ自身に CLI を持つので、引数を組み立てて委譲する
     forwarded: list[str] = []
@@ -181,6 +239,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p_cls = sub.add_parser("classify", help="ingest + regex + (任意) LLM で分類して保存")
     p_cls.add_argument("--csv", default=str(DEFAULT_CSV), help=f"入力 CSV (default: {DEFAULT_CSV})")
+    p_cls.add_argument(
+        "--csv-dir",
+        default=None,
+        help="入力 CSV ディレクトリ（指定時は --csv より優先。実名版で data/raw/ を渡す用途）",
+    )
     p_cls.add_argument("--no-llm", action="store_true", help="LLM 第 2 段をスキップ")
     p_cls.add_argument("--output", default=str(DEFAULT_OUTPUT_PARQUET))
     p_cls.set_defaults(func=_cmd_classify)
@@ -202,6 +265,31 @@ def main(argv: list[str] | None = None) -> int:
     p_exp.add_argument("--period-b", default=None, help="期間 B 上書き（書式は --period-a と同じ）")
     p_exp.add_argument("--period-c", default=None, help="期間 C 上書き（書式は --period-a と同じ）")
     p_exp.set_defaults(func=_cmd_export_html)
+
+    p_pdf = sub.add_parser(
+        "export-pdf",
+        help="診療科別 PDF レポートを local/reports/YYYYMMDD/ に書き出す（実名版）",
+    )
+    p_pdf.add_argument(
+        "--parquet", default=str(DEFAULT_OUTPUT_PARQUET), help="入力 parquet（classify の出力）"
+    )
+    p_pdf.add_argument(
+        "--output-dir",
+        default=None,
+        help=f"出力ディレクトリ（default: {DEFAULT_PDF_OUTPUT_DIR}/YYYYMMDD）",
+    )
+    p_pdf.add_argument(
+        "--targets",
+        default=str(DEFAULT_DEPT_TARGETS),
+        help=f"目標値 YAML (default: {DEFAULT_DEPT_TARGETS})",
+    )
+    p_pdf.add_argument(
+        "--dept", default=None, help="特定診療科のみ出力（未指定で全科 loop）"
+    )
+    p_pdf.add_argument(
+        "--min-cases", type=int, default=30, help="この件数未満の診療科はスキップ (default: 30)"
+    )
+    p_pdf.set_defaults(func=_cmd_export_pdf)
 
     args = parser.parse_args(argv)
 

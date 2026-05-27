@@ -1,0 +1,55 @@
+# 診療科ごとの「週あたり全身麻酔手術件数」目標値。
+#
+# PDF レポート (src/export_pdf.py) の Page 2「全麻手術件数 vs 目標」で使用する。
+# 未設定の診療科は、週次グラフで目標横線・達成率を出さず実績のみ描画する。
+#
+# 形式:
+#   <診療科名>:
+#     weekly_general_anesthesia: <int>   # 週あたり目標件数
+#     effective_from: YYYY-MM-DD         # 適用開始日（任意。複数期で目標が変わる将来用）
+#
+# 値は実値ではなくサンプル。運用前に各診療科と擦り合わせて確定すること。
+
+整形外科:
+  weekly_general_anesthesia: 10
+  effective_from: 2025-04-01
+
+一般消化器外科:
+  weekly_general_anesthesia: 12
+  effective_from: 2025-04-01
+
+産婦人科:
+  weekly_general_anesthesia: 8
+  effective_from: 2025-04-01
+
+泌尿器科:
+  weekly_general_anesthesia: 8
+  effective_from: 2025-04-01
+
+耳鼻咽喉科:
+  weekly_general_anesthesia: 6
+  effective_from: 2025-04-01
+
+形成外科:
+  weekly_general_anesthesia: 4
+  effective_from: 2025-04-01
+
+乳腺外科:
+  weekly_general_anesthesia: 5
+  effective_from: 2025-04-01
+
+脳神経外科:
+  weekly_general_anesthesia: 4
+  effective_from: 2025-04-01
+
+歯科口腔外科:
+  weekly_general_anesthesia: 3
+  effective_from: 2025-04-01
+
+呼吸器外科:
+  weekly_general_anesthesia: 2
+  effective_from: 2025-04-01
+
+心臓血管外科:
+  weekly_general_anesthesia: 2
+  effective_from: 2025-04-01
