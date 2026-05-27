@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ローカル実名版 Streamlit を起動して http://localhost:8501 を開く。
 #
-# - 入力 CSV は data/raw/op1.csv（実名入り、CP932）を SURGERY_CSV 経由で指定
-# - Streamlit が既に 8501 を掴んでいる場合は起動をスキップしてブラウザだけ開く
+# - 入力は data/raw/ 直下の *.csv（実名入り、ファイル名任意・複数可）
+#   → SURGERY_CSV にディレクトリパスを渡し、UI 側で concat → 重複除去 → 正規化
+# - Streamlit が既に 8501 を掴んでいる場合は強制再起動（最新 CSV で読み直し）
 # - ログは /tmp/surgery_streamlit.log
 
 set -euo pipefail
@@ -14,13 +15,27 @@ cd "${ROOT}"
 PORT=8501
 URL="http://localhost:${PORT}"
 LOG="/tmp/surgery_streamlit.log"
-CSV="${ROOT}/data/raw/op1.csv"
+RAW_DIR="${ROOT}/data/raw"
 
-if [ ! -f "${CSV}" ]; then
-    osascript -e "display alert \"Surgery 実名版\" message \"生 CSV が見つかりません:\n${CSV}\" as critical" >/dev/null 2>&1 || true
-    echo "[local_run.sh] ERROR: ${CSV} が見つかりません" >&2
+if [ ! -d "${RAW_DIR}" ]; then
+    osascript -e "display alert \"Surgery 実名版\" message \"生データ ディレクトリが見つかりません:\n${RAW_DIR}\" as critical" >/dev/null 2>&1 || true
+    echo "[local_run.sh] ERROR: ${RAW_DIR} が見つかりません" >&2
     exit 1
 fi
+
+# data/raw/ 直下に *.csv が 1 つでもあるか（サブディレクトリは無視）
+shopt -s nullglob
+RAW_CSVS=("${RAW_DIR}"/*.csv)
+shopt -u nullglob
+if [ "${#RAW_CSVS[@]}" -eq 0 ]; then
+    osascript -e "display alert \"Surgery 実名版\" message \"生 CSV が見つかりません:\n${RAW_DIR}/*.csv\" as critical" >/dev/null 2>&1 || true
+    echo "[local_run.sh] ERROR: ${RAW_DIR} 直下に *.csv がありません" >&2
+    exit 1
+fi
+echo "[local_run.sh] 取り込み対象 CSV: ${#RAW_CSVS[@]} 件"
+for f in "${RAW_CSVS[@]}"; do
+    echo "  - $(basename "$f")"
+done
 
 if [ -x ".venv/bin/streamlit" ]; then
     STREAMLIT=".venv/bin/streamlit"
@@ -32,7 +47,7 @@ else
     exit 1
 fi
 
-export SURGERY_CSV="${CSV}"
+export SURGERY_CSV="${RAW_DIR}"
 
 # 既存プロセスがあれば必ず止めてから起動し直す。
 # Streamlit の @st.cache_data はプロセス内メモリ。.app をダブルクリック

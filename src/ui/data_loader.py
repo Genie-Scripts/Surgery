@@ -15,13 +15,14 @@ import streamlit as st
 from src.aggregate import is_general_anesthesia
 from src.classify import classify, load_rules
 from src.classify_llm import classify_with_llm
-from src.ingest import load
+from src.ingest import list_csv_files, load_auto
 from src.llm_client import LLMClient
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 LLM_CONFIG = ROOT / "config" / "llm_config.yaml"
 
-# 既定 CSV: 環境変数 SURGERY_CSV が指定されていれば優先（ローカル実名版で使用）。
+# 既定パス: 環境変数 SURGERY_CSV が指定されていれば優先（ローカル実名版で使用）。
+# 値はファイル/ディレクトリどちらでも可。ディレクトリなら直下の *.csv を全てマージする。
 # 未指定時は 匿名化フロー出力 → ルート直下サンプル の順にフォールバック。
 _PIPELINE_OUTPUT = ROOT / "data" / "raw" / "anonymized" / "anonymized_data.csv"
 _ROOT_SAMPLE = ROOT / "anonymized_data.csv"
@@ -41,25 +42,30 @@ CATEGORY_LABELS: dict[str, str] = {
 }
 
 
-def _csv_signature(path: str) -> tuple[float, int]:
-    """CSV の (mtime, size) を cache key 用に返す。存在しなければ (0.0, 0)。
+def _csv_signature(path: str) -> tuple[tuple[str, float, int], ...]:
+    """CSV/ディレクトリ配下 CSV 群の (name, mtime, size) を cache key 用に返す。
 
     Streamlit の `@st.cache_data` は引数値で判定するため、ファイルを差し替えても
     `path` 文字列が同じだと古い結果を返してしまう。シグネチャを別引数として
     渡すことで、ファイル更新時にキャッシュを自動失効させる。
+    ディレクトリの場合は直下 *.csv 全てのシグネチャを合算するので、
+    1 ファイル増減・置換でも再読込される。
     """
     p = Path(path)
     if not p.exists():
-        return (0.0, 0)
+        return ()
+    if p.is_dir():
+        files = list_csv_files(p)
+        return tuple((f.name, f.stat().st_mtime, f.stat().st_size) for f in files)
     st_ = p.stat()
-    return (st_.st_mtime, st_.st_size)
+    return ((p.name, st_.st_mtime, st_.st_size),)
 
 
 @st.cache_data(show_spinner="CSV 読込・カテゴリ分類中...")
 def _load_pipeline_cached(
-    path: str, run_llm: bool, _signature: tuple[float, int]
+    path: str, run_llm: bool, _signature: tuple[tuple[str, float, int], ...]
 ) -> tuple[pd.DataFrame, str]:
-    df = load(path)
+    df = load_auto(path)
     df = classify(df)
 
     if run_llm:

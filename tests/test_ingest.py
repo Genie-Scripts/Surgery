@@ -10,7 +10,10 @@ import pytest
 from src.ingest import (
     EXPECTED_COLUMNS,
     IngestResult,
+    list_csv_files,
     load,
+    load_auto,
+    load_directory,
     normalize,
     parse_operators,
     read_csv_with_fallback,
@@ -127,3 +130,68 @@ def test_load_round_trip():
     assert df["手術実施日"].min() == pd.Timestamp("2026-04-01")
     assert df["手術実施日"].max() == pd.Timestamp("2026-04-08")
     assert df["申込区分"].value_counts().to_dict() == {"通常": 6, "緊急": 1, "臨時": 1}
+
+
+# --- list_csv_files / load_directory / load_auto -------------------------
+
+
+def _copy_fixture(src: Path, dst: Path, *, encoding: str = "utf-8-sig") -> None:
+    df = pd.read_csv(src, encoding="utf-8-sig", dtype=str, keep_default_na=True)
+    df.to_csv(dst, index=False, encoding=encoding)
+
+
+def test_list_csv_files_sorts_and_excludes_subdirs(tmp_path):
+    (tmp_path / "b.csv").write_text("x", encoding="utf-8")
+    (tmp_path / "a.csv").write_text("x", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "ignored.csv").write_text("x", encoding="utf-8")
+
+    files = list_csv_files(tmp_path)
+    assert [f.name for f in files] == ["a.csv", "b.csv"]
+
+
+def test_load_directory_merges_and_dedupes(tmp_path):
+    # 同一 fixture を 2 ファイルに分ける。1 ファイル目は全 8 行、2 ファイル目は重複 3 行のみ。
+    full = pd.read_csv(FIXTURE, encoding="utf-8-sig", dtype=str, keep_default_na=True)
+    full.to_csv(tmp_path / "batch_a.csv", index=False, encoding="utf-8-sig")
+    full.head(3).to_csv(tmp_path / "batch_b.csv", index=False, encoding="utf-8-sig")
+
+    df = load_directory(tmp_path)
+    # 重複 3 件は DUP_KEY_COLUMNS で吸収されるので 8 件のまま
+    assert len(df) == 8
+    assert "執刀医" in df.columns
+
+
+def test_load_directory_handles_mixed_encodings(tmp_path):
+    _copy_fixture(FIXTURE, tmp_path / "utf8.csv", encoding="utf-8-sig")
+    _copy_fixture(FIXTURE, tmp_path / "cp932.csv", encoding="cp932")
+
+    df = load_directory(tmp_path)
+    # 同一内容なので dedup 後は元の 8 件
+    assert len(df) == 8
+
+
+def test_load_directory_empty_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        load_directory(tmp_path)
+
+
+def test_load_directory_missing_column_raises(tmp_path):
+    full = pd.read_csv(FIXTURE, encoding="utf-8-sig", dtype=str, keep_default_na=True)
+    full.drop(columns=["申込区分"]).to_csv(tmp_path / "broken.csv", index=False, encoding="utf-8-sig")
+
+    with pytest.raises(ValueError, match="想定列が不足"):
+        load_directory(tmp_path)
+
+
+def test_load_auto_file_vs_directory(tmp_path):
+    # ファイル → load 経由
+    df_file = load_auto(FIXTURE)
+    assert len(df_file) == 8
+
+    # ディレクトリ → load_directory 経由
+    _copy_fixture(FIXTURE, tmp_path / "only.csv")
+    df_dir = load_auto(tmp_path)
+    assert len(df_dir) == 8

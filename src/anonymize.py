@@ -34,7 +34,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.ingest import EXPECTED_COLUMNS, read_csv_with_fallback
+from src.ingest import DUP_KEY_COLUMNS, EXPECTED_COLUMNS, read_csv_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,6 @@ DEFAULT_OUT_FILENAME = "anonymized_data.csv"
 OPERATOR_COLUMN = "実施術者"
 ID_PREFIX = "医師_"
 ID_PATTERN = re.compile(r"^医師_(\d+)$")
-DUP_KEY_COLUMNS = ("手術実施日", "実施手術室", "入室時刻", "確定術式")
 LINE_SPLIT = re.compile(r"\r?\n")
 
 

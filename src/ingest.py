@@ -1,6 +1,6 @@
 """CSV 読込・正規化ユーティリティ。
 
-入力: 手術データ CSV（術者 ID 事前匿名化済み）
+入力: 手術データ CSV（単一ファイル or ディレクトリ）
 出力: 正規化済み DataFrame
 
 実スキーマ（spec.md §2.1）:
@@ -17,11 +17,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # 試行順: BOM 付き UTF-8 → CP932 → Shift-JIS → 素の UTF-8
 ENCODING_FALLBACKS = ("utf-8-sig", "cp932", "shift_jis", "utf-8")
@@ -44,6 +47,10 @@ EXPECTED_COLUMNS = (
 )
 
 MULTILINE_COLUMNS = ("実施術者", "麻酔種別", "確定術式", "術後病名")
+
+# 複数ファイル concat 時の重複行除去キー。
+# 同一症例が複数の供給バッチに重複混入することを想定し、再現性高いキーで吸収する。
+DUP_KEY_COLUMNS = ("手術実施日", "実施手術室", "入室時刻", "確定術式")
 
 _LINE_SPLIT = re.compile(r"\r?\n")
 
@@ -123,7 +130,67 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def list_csv_files(directory: Path | str) -> list[Path]:
+    """`directory` 直下の `*.csv` を昇順で返す。サブディレクトリは除外。
+
+    `data/raw/anonymized/` のような出力先サブディレクトリが混じっても拾わない設計。
+    """
+    directory = Path(directory)
+    return sorted(
+        p for p in directory.iterdir()
+        if p.is_file() and p.suffix.lower() == ".csv"
+    )
+
+
+def _drop_duplicates(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """`DUP_KEY_COLUMNS` で重複行除去。キーが揃わなければスキップして元 df を返す。"""
+    available = [c for c in DUP_KEY_COLUMNS if c in df.columns]
+    if len(available) < len(DUP_KEY_COLUMNS):
+        logger.warning(
+            "重複除去キーが不揃い（揃っているキー: %s）→ 重複除去をスキップ", available
+        )
+        return df, 0
+    before = len(df)
+    out = df.drop_duplicates(subset=list(available), keep="first").reset_index(drop=True)
+    return out, before - len(out)
+
+
 def load(path: Path | str) -> pd.DataFrame:
-    """ファイルパスから正規化済み DataFrame を取得する一発エントリ。"""
+    """単一 CSV から正規化済み DataFrame を取得する一発エントリ。"""
     result = read_csv_with_fallback(path)
     return normalize(result.df)
+
+
+def load_directory(directory: Path | str) -> pd.DataFrame:
+    """ディレクトリ直下の全 CSV を concat → 重複除去 → 正規化して返す。
+
+    ローカル実名版で「ファイル名任意・複数ファイル投入」を実現するためのエントリ。
+    匿名化は行わない。`load` と同じ正規化を適用するため UI 側はファイル/ディレクトリを意識せずに済む。
+    """
+    directory = Path(directory)
+    files = list_csv_files(directory)
+    if not files:
+        raise FileNotFoundError(f"{directory} に CSV ファイルがありません")
+
+    frames: list[pd.DataFrame] = []
+    for f in files:
+        result = read_csv_with_fallback(f)
+        logger.info("読込: %s (encoding=%s, rows=%d)", f.name, result.encoding, len(result.df))
+        missing = [c for c in EXPECTED_COLUMNS if c not in result.df.columns]
+        if missing:
+            raise ValueError(f"{f}: 想定列が不足: {missing}")
+        frames.append(result.df)
+
+    merged = pd.concat(frames, ignore_index=True)
+    deduped, n_dup = _drop_duplicates(merged)
+    if n_dup:
+        logger.info("重複除去: %d 行", n_dup)
+    return normalize(deduped)
+
+
+def load_auto(path: Path | str) -> pd.DataFrame:
+    """`path` がディレクトリなら `load_directory`、ファイルなら `load` にディスパッチ。"""
+    p = Path(path)
+    if p.is_dir():
+        return load_directory(p)
+    return load(p)
