@@ -15,7 +15,7 @@ import pytest
 pytest.importorskip("weasyprint")
 pytest.importorskip("kaleido")
 
-from src.aggregate import fiscal_year_periods
+from src.aggregate import report_periods
 from src.export_pdf import (
     MIN_CASE_COUNT,
     export_all,
@@ -26,9 +26,9 @@ from src.export_pdf import (
 
 
 def _make_df(dept: str = "整形外科", n: int = 50, ly_n: int | None = None) -> pd.DataFrame:
-    """件数 n の DataFrame を生成（今年度 YTD 範囲内に均等分布）。
+    """件数 n の DataFrame を生成（直近3ヶ月窓に均等分布）。
 
-    `ly_n` 省略時は今年度 n の 60% を昨年同期に配置。テストで「件数 < 30 で skip」を
+    `ly_n` 省略時は n の 60% を昨年同3ヶ月に配置。テストで「件数 < 30 で skip」を
     検証する場合は ly_n=0 などで明示的に指定する。
     """
     if ly_n is None:
@@ -87,20 +87,20 @@ def _make_df(dept: str = "整形外科", n: int = 50, ly_n: int | None = None) -
 
 def test_render_dept_html_contains_key_sections():
     df = _make_df()
-    periods = fiscal_year_periods(date(2026, 5, 27))
+    periods = report_periods(date(2026, 5, 27))
     html = render_dept_html(df, "整形外科", periods, target=10, generated_at=datetime(2026, 5, 27))
     assert "整形外科 手術実績レポート" in html
-    assert "全身麻酔手術件数 vs 目標（週次）" in html
+    assert "全身麻酔手術件数 vs 目標（週次・直近12週）" in html
     assert "執刀医ランキング" in html
     assert "主要術式 top 10" in html
-    assert "今年度YTD" in html
+    assert "直近3ヶ月" in html
     # base64 PNG が 6 枚埋め込まれているはず
     assert html.count("data:image/png;base64,") == 6
 
 
 def test_render_dept_pdf_writes_valid_pdf(tmp_path: Path):
     df = _make_df()
-    periods = fiscal_year_periods(date(2026, 5, 27))
+    periods = report_periods(date(2026, 5, 27))
     out = tmp_path / "test.pdf"
     written = render_dept_pdf(df, "整形外科", out, periods, target=10)
     assert written.exists()

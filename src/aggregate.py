@@ -17,13 +17,19 @@
 
 PDF レポート向け（src/export_pdf.py で使用）:
   - month_end_cutoff(today):            月締めの集計終端日（前月末日）
-  - fiscal_year_periods(today):         今年度 YTD と昨年同期の (start, end) ペア
-  - kpi_overall_yoy(df, periods):       4 項目 KPI の対前年同期
-  - monthly_count_by_fiscal_year(...):  月次推移 2 系列（今年度/昨年度）
+  - fiscal_year_periods(today):         今年度 YTD と昨年同期の (start, end) ペア（表示用）
+  - report_periods(today):              PDF レポートの全比較窓（3mo/12mo/12週）
+  - kpi_overall_compare(df, recent, comparison):
+                                         任意の 2 窓で 4 項目 KPI を比較
+  - monthly_count_compare(...):         任意の 2 窓で月次件数を 12 行で並べる
+  - monthly_avg_time_compare(...):      月次 平均手術時間
+  - monthly_general_anesthesia_compare(...): 月次 全麻件数
+  - monthly_category_compare(...):      カテゴリ別 月次件数
   - weekly_general_anesthesia(...):     週次 全麻件数（目標達成判定込み）
-  - top_n_procedures(...):              主要術式 top N（対前年同期付き）
-  - top_n_postop_diagnoses(...):        主要術後病名 top N（同上）
-  - kpi_per_doctor_yoy(...):            執刀医ランキング（対前年同期付き）
+  - top_n_procedures(df, recent, comparison, n): 主要術式 top N
+  - top_n_postop_diagnoses(df, recent, comparison, n): 主要術後病名 top N
+  - kpi_per_doctor_compare_window(...): 執刀医ランキング（任意の 2 窓）
+  - category_counts_compare_window(...):カテゴリ別件数（任意の 2 窓）
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from datetime import date, timedelta
 from typing import Literal
 
 import pandas as pd
+from dateutil.relativedelta import relativedelta
 
 OperatorMode = Literal["lead_only", "all"]
 
@@ -294,18 +301,42 @@ def category_monthly_trend(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# PDF レポート向け（月締め・対前年同期）
+# PDF レポート向け（月締め・任意の比較窓）
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class FiscalYearPeriods:
-    """今年度 YTD と昨年同期間（同日数）のペア。"""
+    """今年度 YTD と昨年同期間（表示メタデータ用、PDF 本体の比較窓は ReportPeriods）。"""
 
     fiscal_year: int  # 今年度（4 月開始の年）。例: 2026/4〜2027/3 なら 2026
     cutoff: date  # 集計終端（前月末日）
     ytd: tuple[date, date]  # (4/1/FY, cutoff)
     last_year: tuple[date, date]  # (4/1/(FY-1), 同日数前の終端)
+
+
+@dataclass(frozen=True)
+class ReportPeriods:
+    """PDF レポートの各セクションが使う比較窓。
+
+    cutoff = today の前月末日。各窓は両端含む (start, end) のタプル。
+
+    用途別の対応:
+      - Page 1 KPI カード:         recent_3mo  vs  yoy_3mo   (季節性キャンセル)
+      - 月次折れ線 (件数/平均/全麻/カテゴリ): recent_12mo vs prior_12mo
+      - 週次 全麻 vs 目標:         weekly_12w  (単一窓・直近 12 週)
+      - 表/カテゴリバー (ランキング、術式・病名 Top10):
+                                   recent_3mo  vs  prior_3mo (順次比較)
+    """
+
+    fiscal_year: int  # cutoff が属する会計年度（表示用）
+    cutoff: date
+    recent_3mo: tuple[date, date]
+    prior_3mo: tuple[date, date]
+    yoy_3mo: tuple[date, date]
+    recent_12mo: tuple[date, date]
+    prior_12mo: tuple[date, date]
+    weekly_12w: tuple[date, date]
 
 
 def month_end_cutoff(today: date) -> date:
@@ -320,7 +351,7 @@ def month_end_cutoff(today: date) -> date:
 
 
 def fiscal_year_periods(today: date) -> FiscalYearPeriods:
-    """月締めで今年度 YTD と昨年同期間を導出する。
+    """月締めで今年度 YTD と昨年同期間を導出する（表示メタ用）。
 
     - 年度 = 4 月開始
     - cutoff = 前月末日（`month_end_cutoff`）
@@ -334,13 +365,70 @@ def fiscal_year_periods(today: date) -> FiscalYearPeriods:
     try:
         ly_end = cutoff.replace(year=cutoff.year - 1)
     except ValueError:
-        # 2/29 → 前年は 2/28
         ly_end = cutoff.replace(year=cutoff.year - 1, day=28)
     return FiscalYearPeriods(
         fiscal_year=fiscal_year,
         cutoff=cutoff,
         ytd=(ytd_start, cutoff),
         last_year=(ly_start, ly_end),
+    )
+
+
+def _start_of_month(d: date) -> date:
+    return d.replace(day=1)
+
+
+def _shift_back_months(d: date, months: int) -> date:
+    """`d` の年月から `months` ヶ月前の同月 1 日を返す（日付は無視）。"""
+    return _start_of_month(d) - relativedelta(months=months)
+
+
+def _months_ago(d: date, months: int) -> date:
+    """`d` から純粋に `months` ヶ月前。閏日は relativedelta が自動で 28/29 を丸める。"""
+    return d - relativedelta(months=months)
+
+
+def report_periods(today: date) -> ReportPeriods:
+    """PDF レポートで使う比較窓を一括導出する。
+
+    - cutoff = 前月末日
+    - recent_3mo: cutoff を含む 3 ヶ月 (cutoff の月 1 日から 2 ヶ月遡って 1 日, cutoff)
+    - prior_3mo:  recent_3mo の直前 3 ヶ月
+    - yoy_3mo:    recent_3mo の 1 年前同 3 ヶ月
+    - recent_12mo: cutoff を含む 12 ヶ月
+    - prior_12mo:  recent_12mo の直前 12 ヶ月
+    - weekly_12w:  cutoff の週月曜を含む過去 12 週
+    """
+    cutoff = month_end_cutoff(today)
+    fiscal_year = cutoff.year if cutoff.month >= 4 else cutoff.year - 1
+
+    recent_3mo_start = _shift_back_months(cutoff, 2)  # 当月含めて 3 ヶ月遡る
+    recent_3mo = (recent_3mo_start, cutoff)
+    prior_3mo_end = recent_3mo_start - timedelta(days=1)
+    prior_3mo_start = _shift_back_months(prior_3mo_end, 2)
+    prior_3mo = (prior_3mo_start, prior_3mo_end)
+    yoy_3mo = (_months_ago(recent_3mo_start, 12), _months_ago(cutoff, 12))
+
+    recent_12mo_start = _shift_back_months(cutoff, 11)
+    recent_12mo = (recent_12mo_start, cutoff)
+    prior_12mo_end = recent_12mo_start - timedelta(days=1)
+    prior_12mo_start = _shift_back_months(prior_12mo_end, 11)
+    prior_12mo = (prior_12mo_start, prior_12mo_end)
+
+    cutoff_ts = pd.Timestamp(cutoff)
+    last_monday = cutoff_ts - pd.Timedelta(days=cutoff_ts.weekday())
+    first_monday = last_monday - pd.Timedelta(days=11 * 7)
+    weekly_12w = (first_monday.date(), cutoff)
+
+    return ReportPeriods(
+        fiscal_year=fiscal_year,
+        cutoff=cutoff,
+        recent_3mo=recent_3mo,
+        prior_3mo=prior_3mo,
+        yoy_3mo=yoy_3mo,
+        recent_12mo=recent_12mo,
+        prior_12mo=prior_12mo,
+        weekly_12w=weekly_12w,
     )
 
 
@@ -358,16 +446,24 @@ def general_anesthesia_count(df: pd.DataFrame) -> int:
     return int(df["麻酔種別"].apply(is_general_anesthesia).sum())
 
 
-def kpi_overall_yoy(df: pd.DataFrame, periods: FiscalYearPeriods) -> dict[str, dict[str, float | int]]:
-    """今年度 YTD と昨年同期の 4 項目 KPI を返す。
+def kpi_overall_compare(
+    df: pd.DataFrame,
+    recent: tuple[date, date],
+    comparison: tuple[date, date],
+) -> dict[str, dict[str, float | int]]:
+    """任意の 2 窓で 4 項目 KPI を返す。
 
     KPI: 件数 / 平均手術時間_分 / 緊急比率 / 全麻手術件数
-    返却: {"ytd": {...}, "last_year": {...}, "diff": {...}}
+    返却: {"recent": {...}, "comparison": {...}, "diff": {...}}
     """
 
     def _kpi(slice_df: pd.DataFrame) -> dict[str, float | int]:
         n = len(slice_df)
-        times = slice_df["予定手術時間"].dropna() if "予定手術時間" in slice_df.columns else pd.Series(dtype=float)
+        times = (
+            slice_df["予定手術時間"].dropna()
+            if "予定手術時間" in slice_df.columns
+            else pd.Series(dtype=float)
+        )
         return {
             "件数": int(n),
             "平均手術時間_分": float(times.mean()) if len(times) else 0.0,
@@ -375,45 +471,134 @@ def kpi_overall_yoy(df: pd.DataFrame, periods: FiscalYearPeriods) -> dict[str, d
             "全麻手術件数": general_anesthesia_count(slice_df),
         }
 
-    ytd = _kpi(_slice_period(df, periods.ytd))
-    ly = _kpi(_slice_period(df, periods.last_year))
-    diff = {k: ytd[k] - ly[k] for k in ytd}
-    return {"ytd": ytd, "last_year": ly, "diff": diff}
+    r = _kpi(_slice_period(df, recent))
+    c = _kpi(_slice_period(df, comparison))
+    diff = {k: r[k] - c[k] for k in r}
+    return {"recent": r, "comparison": c, "diff": diff}
 
 
-def monthly_count_by_fiscal_year(
-    df: pd.DataFrame, periods: FiscalYearPeriods
+def _month_iter(window: tuple[date, date]) -> list[pd.Timestamp]:
+    """window を含む各月の 1 日 (Timestamp) を昇順で返す。"""
+    start = pd.Timestamp(_start_of_month(window[0]))
+    end = pd.Timestamp(_start_of_month(window[1]))
+    return list(pd.date_range(start, end, freq="MS"))
+
+
+def _monthly_size(slice_df: pd.DataFrame) -> pd.Series:
+    if slice_df.empty:
+        return pd.Series(dtype="int64")
+    return slice_df.set_index("手術実施日").resample("MS").size()
+
+
+def _monthly_mean_time(slice_df: pd.DataFrame) -> pd.Series:
+    if slice_df.empty:
+        return pd.Series(dtype="float64")
+    return slice_df.set_index("手術実施日").resample("MS")["予定手術時間"].mean()
+
+
+def _monthly_sum(slice_df: pd.DataFrame, col: str) -> pd.Series:
+    if slice_df.empty or col not in slice_df.columns:
+        return pd.Series(dtype="int64")
+    return slice_df.set_index("手術実施日").resample("MS")[col].sum().astype("int64")
+
+
+def _align_two_windows(
+    recent_window: tuple[date, date],
+    prior_window: tuple[date, date],
+    recent_series: pd.Series,
+    prior_series: pd.Series,
+    fill: float | int = 0,
 ) -> pd.DataFrame:
-    """月次件数を「今年度 vs 昨年度」の 2 系列で返す（同月並列）。
+    """recent / prior 窓の月系列を「窓内のオフセット」で並列に並べる。
 
-    返却列: 月オフセット (int, 0=4 月, 1=5 月, ..., 11=3 月),
-            月ラベル (str, 'MM 月'), 今年度件数 (int), 昨年度件数 (int)
+    返却列: 月オフセット, 月ラベル (YYYY-MM, recent 側), 直近, 前期
     """
-    cy = _slice_period(df, periods.ytd).copy()
-    ly = _slice_period(df, periods.last_year).copy()
+    r_months = _month_iter(recent_window)
+    p_months = _month_iter(prior_window)
+    n = min(len(r_months), len(p_months))
+    rows = []
+    for i in range(n):
+        rm = r_months[i]
+        pm = p_months[i]
+        r_val = recent_series.get(rm, fill)
+        p_val = prior_series.get(pm, fill)
+        rows.append(
+            {
+                "月オフセット": i,
+                "月ラベル": rm.strftime("%Y-%m"),
+                "直近": r_val,
+                "前期": p_val,
+            }
+        )
+    return pd.DataFrame(rows)
 
-    def _monthly(slice_df: pd.DataFrame, start_year: int) -> pd.Series:
+
+def monthly_count_compare(
+    df: pd.DataFrame,
+    recent_window: tuple[date, date],
+    prior_window: tuple[date, date],
+) -> pd.DataFrame:
+    """月次件数を「直近 vs 前期」で並列に返す。
+
+    返却列: 月オフセット, 月ラベル (YYYY-MM), 直近, 前期 (どちらも件数 int)
+    """
+    r = _monthly_size(_slice_period(df, recent_window))
+    p = _monthly_size(_slice_period(df, prior_window))
+    out = _align_two_windows(recent_window, prior_window, r, p, fill=0)
+    if not out.empty:
+        out["直近"] = out["直近"].astype("int64")
+        out["前期"] = out["前期"].astype("int64")
+    return out
+
+
+def monthly_avg_time_compare(
+    df: pd.DataFrame,
+    recent_window: tuple[date, date],
+    prior_window: tuple[date, date],
+) -> pd.DataFrame:
+    """月次 平均手術時間 (分) を「直近 vs 前期」で並列に返す。欠損月は NaN。"""
+    r = _monthly_mean_time(_slice_period(df, recent_window))
+    p = _monthly_mean_time(_slice_period(df, prior_window))
+    return _align_two_windows(recent_window, prior_window, r, p, fill=float("nan"))
+
+
+def monthly_general_anesthesia_compare(
+    df: pd.DataFrame,
+    recent_window: tuple[date, date],
+    prior_window: tuple[date, date],
+) -> pd.DataFrame:
+    """月次 全麻件数を「直近 vs 前期」で並列に返す。"""
+
+    def _ga_monthly(slice_df: pd.DataFrame) -> pd.Series:
         if slice_df.empty:
             return pd.Series(dtype="int64")
-        s = slice_df.set_index("手術実施日").resample("MS").size()
-        # 月オフセット (4 月=0, ..., 3 月=11) でインデックス
-        return s.rename_axis("month").rename(
-            index=lambda ts: (ts.month - 4) % 12
-        )
+        ga = slice_df[_general_anesthesia_mask(slice_df)]
+        if ga.empty:
+            return pd.Series(dtype="int64")
+        return ga.set_index("手術実施日").resample("MS").size().astype("int64")
 
-    cy_m = _monthly(cy, periods.fiscal_year)
-    ly_m = _monthly(ly, periods.fiscal_year - 1)
+    r = _ga_monthly(_slice_period(df, recent_window))
+    p = _ga_monthly(_slice_period(df, prior_window))
+    out = _align_two_windows(recent_window, prior_window, r, p, fill=0)
+    if not out.empty:
+        out["直近"] = out["直近"].astype("int64")
+        out["前期"] = out["前期"].astype("int64")
+    return out
 
-    months = list(range(12))
-    labels = [f"{(i + 3) % 12 + 1} 月" for i in months]
-    out = pd.DataFrame(
-        {
-            "月オフセット": months,
-            "月ラベル": labels,
-            "今年度件数": [int(cy_m.get(i, 0)) for i in months],
-            "昨年度件数": [int(ly_m.get(i, 0)) for i in months],
-        }
-    )
+
+def monthly_category_compare(
+    df: pd.DataFrame,
+    recent_window: tuple[date, date],
+    prior_window: tuple[date, date],
+    category: str,
+) -> pd.DataFrame:
+    """指定カテゴリの月次件数を「直近 vs 前期」で並列に返す。"""
+    r = _monthly_sum(_slice_period(df, recent_window), category)
+    p = _monthly_sum(_slice_period(df, prior_window), category)
+    out = _align_two_windows(recent_window, prior_window, r, p, fill=0)
+    if not out.empty:
+        out["直近"] = out["直近"].astype("int64")
+        out["前期"] = out["前期"].astype("int64")
     return out
 
 
@@ -442,7 +627,6 @@ def weekly_general_anesthesia(
     sliced = _slice_period(df, period)
     ga = sliced[_general_anesthesia_mask(sliced)] if not sliced.empty else sliced
 
-    # ISO 週の月曜起算で集計
     if not ga.empty:
         wk = (
             ga.assign(週開始日=ga["手術実施日"].dt.to_period("W-SUN").dt.start_time)
@@ -452,7 +636,6 @@ def weekly_general_anesthesia(
     else:
         wk = pd.Series(dtype="int64")
 
-    # period を含む全週を生成（start の週の月曜 〜 end の週の月曜）
     start_ts = pd.Timestamp(start)
     end_ts = pd.Timestamp(end)
     first_monday = start_ts - pd.Timedelta(days=start_ts.weekday())
@@ -468,111 +651,147 @@ def weekly_general_anesthesia(
     return out
 
 
-def _top_n_with_yoy(
+def _top_n_with_compare(
     df: pd.DataFrame,
     column: str,
-    periods: FiscalYearPeriods,
+    recent: tuple[date, date],
+    comparison: tuple[date, date],
     n: int,
 ) -> pd.DataFrame:
-    """指定列の value_counts top N を今年度 YTD ベースで取り、昨年同期件数を併記する。"""
+    """指定列の value_counts top N を recent 窓で取り、comparison 窓の件数を併記。
+
+    返却列: <column>, 直近件数, 比較件数, 差分
+    """
     if column not in df.columns:
-        return pd.DataFrame(columns=[column, "今年度件数", "昨年同期件数", "差分"])
+        return pd.DataFrame(columns=[column, "直近件数", "比較件数", "差分"])
 
-    cy = _slice_period(df, periods.ytd)
-    ly = _slice_period(df, periods.last_year)
+    r = _slice_period(df, recent)
+    c = _slice_period(df, comparison)
+    if r.empty:
+        return pd.DataFrame(columns=[column, "直近件数", "比較件数", "差分"])
 
-    if cy.empty:
-        return pd.DataFrame(columns=[column, "今年度件数", "昨年同期件数", "差分"])
+    r_counts = r[column].dropna().value_counts()
+    if r_counts.empty:
+        return pd.DataFrame(columns=[column, "直近件数", "比較件数", "差分"])
 
-    cy_counts = cy[column].dropna().value_counts()
-    if cy_counts.empty:
-        return pd.DataFrame(columns=[column, "今年度件数", "昨年同期件数", "差分"])
-
-    top = cy_counts.head(n)
-    ly_counts = ly[column].dropna().value_counts() if not ly.empty else pd.Series(dtype="int64")
-
+    top = r_counts.head(n)
+    c_counts = c[column].dropna().value_counts() if not c.empty else pd.Series(dtype="int64")
     out = pd.DataFrame(
         {
             column: top.index,
-            "今年度件数": top.values.astype("int64"),
-            "昨年同期件数": [int(ly_counts.get(k, 0)) for k in top.index],
+            "直近件数": top.values.astype("int64"),
+            "比較件数": [int(c_counts.get(k, 0)) for k in top.index],
         }
     )
-    out["差分"] = out["今年度件数"] - out["昨年同期件数"]
+    out["差分"] = out["直近件数"] - out["比較件数"]
     return out.reset_index(drop=True)
 
 
-def top_n_procedures(df: pd.DataFrame, periods: FiscalYearPeriods, n: int = 10) -> pd.DataFrame:
-    """主要術式 top N（今年度 YTD ベース、昨年同期件数を併記）。"""
-    return _top_n_with_yoy(df, "確定術式", periods, n)
-
-
-def top_n_postop_diagnoses(df: pd.DataFrame, periods: FiscalYearPeriods, n: int = 10) -> pd.DataFrame:
-    """主要術後病名 top N（今年度 YTD ベース、昨年同期件数を併記）。"""
-    return _top_n_with_yoy(df, "術後病名", periods, n)
-
-
-def kpi_per_doctor_yoy(
+def top_n_procedures(
     df: pd.DataFrame,
-    periods: FiscalYearPeriods,
+    recent: tuple[date, date],
+    comparison: tuple[date, date],
+    n: int = 10,
+) -> pd.DataFrame:
+    """主要術式 top N (recent 基準、comparison 件数を併記)。"""
+    return _top_n_with_compare(df, "確定術式", recent, comparison, n)
+
+
+def top_n_postop_diagnoses(
+    df: pd.DataFrame,
+    recent: tuple[date, date],
+    comparison: tuple[date, date],
+    n: int = 10,
+) -> pd.DataFrame:
+    """主要術後病名 top N (recent 基準、comparison 件数を併記)。"""
+    return _top_n_with_compare(df, "術後病名", recent, comparison, n)
+
+
+def kpi_per_doctor_compare_window(
+    df: pd.DataFrame,
+    recent: tuple[date, date],
+    comparison: tuple[date, date],
     mode: OperatorMode = "lead_only",
     top_n: int = 20,
 ) -> pd.DataFrame:
-    """執刀医ランキングを今年度 YTD ベースで、昨年同期件数を併記して返す。
+    """執刀医ランキング (recent 基準) + comparison 件数を返す。
 
     `mode="lead_only"`: 1 手術 = 1 行（執刀医）
+        返却列: 順位, 医師, 直近件数, 比較件数, 差分, 平均時間_分, 緊急件数
     `mode="all"`: 1 手術 × N 医師（執刀＋助手）
-
-    返却列 (lead_only): 順位, 医師, 今年度件数, 昨年同期件数, 差分, 平均時間_分, 緊急件数
-    返却列 (all):       順位, 医師, 今年執刀, 今年助手, 今年合計, 昨年合計, 差分
+        返却列: 順位, 医師, 直近執刀, 直近助手, 直近合計, 比較合計, 差分
     """
     long_df = expand_operators(df, mode)
-    cy = _slice_period(long_df, periods.ytd)
-    ly = _slice_period(long_df, periods.last_year)
+    r = _slice_period(long_df, recent)
+    c = _slice_period(long_df, comparison)
 
-    if cy.empty:
+    if r.empty:
         cols = (
-            ["順位", "医師", "今年度件数", "昨年同期件数", "差分", "平均時間_分", "緊急件数"]
+            ["順位", "医師", "直近件数", "比較件数", "差分", "平均時間_分", "緊急件数"]
             if mode == "lead_only"
-            else ["順位", "医師", "今年執刀", "今年助手", "今年合計", "昨年合計", "差分"]
+            else ["順位", "医師", "直近執刀", "直近助手", "直近合計", "比較合計", "差分"]
         )
         return pd.DataFrame(columns=cols)
 
     if mode == "lead_only":
-        g = cy.groupby("医師", dropna=False)
-        cy_kpi = pd.DataFrame(
+        g = r.groupby("医師", dropna=False)
+        out = pd.DataFrame(
             {
-                "今年度件数": g.size(),
+                "直近件数": g.size(),
                 "平均時間_分": g["予定手術時間"].mean(),
                 "緊急件数": g["申込区分"].apply(lambda s: int((s == "緊急").sum())),
             }
         ).reset_index()
-        ly_counts = ly.groupby("医師", dropna=False).size() if not ly.empty else pd.Series(dtype="int64")
-        cy_kpi["昨年同期件数"] = cy_kpi["医師"].map(ly_counts).fillna(0).astype("int64")
-        cy_kpi["差分"] = cy_kpi["今年度件数"].astype("int64") - cy_kpi["昨年同期件数"]
-        cy_kpi = cy_kpi.sort_values("今年度件数", ascending=False).head(top_n).reset_index(drop=True)
-        cy_kpi.insert(0, "順位", range(1, len(cy_kpi) + 1))
-        return cy_kpi[["順位", "医師", "今年度件数", "昨年同期件数", "差分", "平均時間_分", "緊急件数"]]
+        c_counts = (
+            c.groupby("医師", dropna=False).size()
+            if not c.empty
+            else pd.Series(dtype="int64")
+        )
+        out["比較件数"] = out["医師"].map(c_counts).fillna(0).astype("int64")
+        out["差分"] = out["直近件数"].astype("int64") - out["比較件数"]
+        out = out.sort_values("直近件数", ascending=False).head(top_n).reset_index(drop=True)
+        out.insert(0, "順位", range(1, len(out) + 1))
+        return out[["順位", "医師", "直近件数", "比較件数", "差分", "平均時間_分", "緊急件数"]]
 
-    # mode == "all"
-    cy_lead = (cy[cy["役割"] == "執刀医"].groupby("医師", dropna=False).size()
-               if not cy.empty else pd.Series(dtype="int64"))
-    cy_assist = (cy[cy["役割"] == "助手"].groupby("医師", dropna=False).size()
-                 if not cy.empty else pd.Series(dtype="int64"))
-    cy_total = cy.groupby("医師", dropna=False).size() if not cy.empty else pd.Series(dtype="int64")
-    ly_total = ly.groupby("医師", dropna=False).size() if not ly.empty else pd.Series(dtype="int64")
+    r_lead = r[r["役割"] == "執刀医"].groupby("医師", dropna=False).size()
+    r_assist = r[r["役割"] == "助手"].groupby("医師", dropna=False).size()
+    r_total = r.groupby("医師", dropna=False).size()
+    c_total = (
+        c.groupby("医師", dropna=False).size() if not c.empty else pd.Series(dtype="int64")
+    )
 
-    all_doctors = cy_total.index
+    all_doctors = r_total.index
     out = pd.DataFrame(
         {
             "医師": all_doctors,
-            "今年執刀": [int(cy_lead.get(d, 0)) for d in all_doctors],
-            "今年助手": [int(cy_assist.get(d, 0)) for d in all_doctors],
-            "今年合計": cy_total.values.astype("int64"),
-            "昨年合計": [int(ly_total.get(d, 0)) for d in all_doctors],
+            "直近執刀": [int(r_lead.get(d, 0)) for d in all_doctors],
+            "直近助手": [int(r_assist.get(d, 0)) for d in all_doctors],
+            "直近合計": r_total.values.astype("int64"),
+            "比較合計": [int(c_total.get(d, 0)) for d in all_doctors],
         }
     )
-    out["差分"] = out["今年合計"] - out["昨年合計"]
-    out = out.sort_values("今年合計", ascending=False).head(top_n).reset_index(drop=True)
+    out["差分"] = out["直近合計"] - out["比較合計"]
+    out = out.sort_values("直近合計", ascending=False).head(top_n).reset_index(drop=True)
     out.insert(0, "順位", range(1, len(out) + 1))
     return out
+
+
+def category_counts_compare_window(
+    df: pd.DataFrame,
+    recent: tuple[date, date],
+    comparison: tuple[date, date],
+) -> pd.DataFrame:
+    """4 カテゴリそれぞれの (直近件数, 比較件数, 差分) を返す。
+
+    返却列: カテゴリ, 直近件数, 比較件数, 差分
+    """
+    r = _slice_period(df, recent)
+    c = _slice_period(df, comparison)
+    rows = []
+    for col in CATEGORY_COLUMNS:
+        if col not in df.columns:
+            continue
+        r_n = int(r[col].sum()) if not r.empty else 0
+        c_n = int(c[col].sum()) if not c.empty else 0
+        rows.append({"カテゴリ": col, "直近件数": r_n, "比較件数": c_n, "差分": r_n - c_n})
+    return pd.DataFrame(rows)

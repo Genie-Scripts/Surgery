@@ -28,11 +28,15 @@ import yaml
 
 from src.aggregate import (
     CATEGORY_COLUMNS,
-    FiscalYearPeriods,
-    fiscal_year_periods,
-    kpi_overall_yoy,
-    kpi_per_doctor_yoy,
-    monthly_count_by_fiscal_year,
+    ReportPeriods,
+    category_counts_compare_window,
+    kpi_overall_compare,
+    kpi_per_doctor_compare_window,
+    monthly_avg_time_compare,
+    monthly_category_compare,
+    monthly_count_compare,
+    monthly_general_anesthesia_compare,
+    report_periods,
     top_n_postop_diagnoses,
     top_n_procedures,
     weekly_general_anesthesia,
@@ -51,9 +55,9 @@ CATEGORY_LABELS: dict[str, str] = {
 }
 
 # 配色: アクセント青 + グレースケール
-COLOR_PRIMARY = "#0d6efd"  # 今年度
+COLOR_PRIMARY = "#0d6efd"  # 直近側
 COLOR_PRIMARY_LIGHT = "#9ec5fe"
-COLOR_LAST_YEAR = "#adb5bd"  # 昨年度
+COLOR_COMPARE = "#adb5bd"  # 比較側 (前期 / 昨年同期)
 COLOR_TEXT = "#212529"
 COLOR_MUTED = "#6c757d"
 COLOR_OK = "#198754"
@@ -129,74 +133,57 @@ def _fig_to_data_uri(fig: go.Figure, width: int = 900, height: int = 280) -> str
     return f"data:image/png;base64,{b64}"
 
 
-def _fig_monthly_count_yoy(df_dept: pd.DataFrame, periods: FiscalYearPeriods) -> go.Figure:
-    mt = monthly_count_by_fiscal_year(df_dept, periods)
+def _fig_monthly_count_rolling(df_dept: pd.DataFrame, periods: ReportPeriods) -> go.Figure:
+    mt = monthly_count_compare(df_dept, periods.recent_12mo, periods.prior_12mo)
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
-            x=mt["月ラベル"], y=mt["今年度件数"], mode="lines+markers",
-            name=f"今年度 (FY{periods.fiscal_year})",
+            x=mt["月ラベル"], y=mt["直近"], mode="lines+markers",
+            name="直近12ヶ月",
             line={"color": COLOR_PRIMARY, "width": 2.5}, marker={"size": 7},
         )
     )
     fig.add_trace(
         go.Scatter(
-            x=mt["月ラベル"], y=mt["昨年度件数"], mode="lines+markers",
-            name=f"昨年度 (FY{periods.fiscal_year - 1})",
-            line={"color": COLOR_LAST_YEAR, "width": 2, "dash": "dot"}, marker={"size": 6},
+            x=mt["月ラベル"], y=mt["前期"], mode="lines+markers",
+            name="その前12ヶ月",
+            line={"color": COLOR_COMPARE, "width": 2, "dash": "dot"}, marker={"size": 6},
         )
     )
-    return _common_layout(fig, title="月次 件数（今年度 vs 昨年度）")
+    return _common_layout(fig, title="月次 件数（直近12ヶ月 vs その前12ヶ月）")
 
 
-def _fig_monthly_avg_time_yoy(df_dept: pd.DataFrame, periods: FiscalYearPeriods) -> go.Figure:
-    def _monthly_avg(slice_df: pd.DataFrame) -> pd.Series:
-        if slice_df.empty:
-            return pd.Series(dtype="float64")
-        s = slice_df.set_index("手術実施日").resample("MS")["予定手術時間"].mean()
-        return s.rename_axis("month").rename(index=lambda ts: (ts.month - 4) % 12)
-
-    cy = df_dept[(df_dept["手術実施日"] >= pd.Timestamp(periods.ytd[0]))
-                 & (df_dept["手術実施日"] <= pd.Timestamp(periods.ytd[1]))]
-    ly = df_dept[(df_dept["手術実施日"] >= pd.Timestamp(periods.last_year[0]))
-                 & (df_dept["手術実施日"] <= pd.Timestamp(periods.last_year[1]))]
-    cy_m = _monthly_avg(cy)
-    ly_m = _monthly_avg(ly)
-
-    months = list(range(12))
-    labels = [f"{(i + 3) % 12 + 1} 月" for i in months]
-    cy_vals = [float(cy_m.get(i, float("nan"))) for i in months]
-    ly_vals = [float(ly_m.get(i, float("nan"))) for i in months]
-
+def _fig_monthly_avg_time_rolling(df_dept: pd.DataFrame, periods: ReportPeriods) -> go.Figure:
+    mt = monthly_avg_time_compare(df_dept, periods.recent_12mo, periods.prior_12mo)
     fig = go.Figure()
     fig.add_trace(
-        go.Scatter(x=labels, y=cy_vals, mode="lines+markers",
-                   name=f"今年度 (FY{periods.fiscal_year})",
+        go.Scatter(x=mt["月ラベル"], y=mt["直近"], mode="lines+markers",
+                   name="直近12ヶ月",
                    line={"color": COLOR_PRIMARY, "width": 2.5}, marker={"size": 7},
                    connectgaps=False)
     )
     fig.add_trace(
-        go.Scatter(x=labels, y=ly_vals, mode="lines+markers",
-                   name=f"昨年度 (FY{periods.fiscal_year - 1})",
-                   line={"color": COLOR_LAST_YEAR, "width": 2, "dash": "dot"}, marker={"size": 6},
+        go.Scatter(x=mt["月ラベル"], y=mt["前期"], mode="lines+markers",
+                   name="その前12ヶ月",
+                   line={"color": COLOR_COMPARE, "width": 2, "dash": "dot"}, marker={"size": 6},
                    connectgaps=False)
     )
     return _common_layout(fig, title="月次 平均手術時間 (分)")
 
 
 def _fig_weekly_ga_vs_target(
-    df_dept: pd.DataFrame, periods: FiscalYearPeriods, target: int | None
+    df_dept: pd.DataFrame, periods: ReportPeriods, target: int | None
 ) -> go.Figure:
-    wk = weekly_general_anesthesia(df_dept, periods.ytd, target=target)
+    wk = weekly_general_anesthesia(df_dept, periods.weekly_12w, target=target)
     if wk.empty:
         fig = go.Figure()
-        fig.add_annotation(text="今年度データなし", xref="paper", yref="paper",
+        fig.add_annotation(text="直近12週データなし", xref="paper", yref="paper",
                            x=0.5, y=0.5, showarrow=False, font={"size": 13, "color": COLOR_MUTED})
         fig.update_layout(xaxis={"visible": False}, yaxis={"visible": False}, height=240)
         return fig
 
     if target is not None:
-        bar_colors = [COLOR_PRIMARY if v >= target else COLOR_LAST_YEAR for v in wk["全麻件数"]]
+        bar_colors = [COLOR_PRIMARY if v >= target else COLOR_COMPARE for v in wk["全麻件数"]]
     else:
         bar_colors = [COLOR_PRIMARY] * len(wk)
 
@@ -212,67 +199,46 @@ def _fig_weekly_ga_vs_target(
                       annotation_position="top right",
                       annotation_font={"color": COLOR_NG, "size": 10})
 
-    title = "週次 全麻手術件数 vs 目標" if target is not None else "週次 全麻手術件数（目標未設定）"
+    title = "週次 全麻手術件数 vs 目標（直近12週）" if target is not None \
+        else "週次 全麻手術件数（直近12週・目標未設定）"
     fig = _common_layout(fig, title=title, height=300)
     fig.update_layout(showlegend=False)
     return fig
 
 
-def _fig_monthly_ga_yoy(df_dept: pd.DataFrame, periods: FiscalYearPeriods) -> go.Figure:
-    from src.aggregate import _general_anesthesia_mask  # noqa: PLC0415
-
-    def _monthly(slice_df: pd.DataFrame) -> pd.Series:
-        if slice_df.empty:
-            return pd.Series(dtype="int64")
-        ga = slice_df[_general_anesthesia_mask(slice_df)]
-        if ga.empty:
-            return pd.Series(dtype="int64")
-        s = ga.set_index("手術実施日").resample("MS").size()
-        return s.rename_axis("month").rename(index=lambda ts: (ts.month - 4) % 12)
-
-    cy = df_dept[(df_dept["手術実施日"] >= pd.Timestamp(periods.ytd[0]))
-                 & (df_dept["手術実施日"] <= pd.Timestamp(periods.ytd[1]))]
-    ly = df_dept[(df_dept["手術実施日"] >= pd.Timestamp(periods.last_year[0]))
-                 & (df_dept["手術実施日"] <= pd.Timestamp(periods.last_year[1]))]
-    cy_m = _monthly(cy)
-    ly_m = _monthly(ly)
-
-    months = list(range(12))
-    labels = [f"{(i + 3) % 12 + 1} 月" for i in months]
+def _fig_monthly_ga_rolling(df_dept: pd.DataFrame, periods: ReportPeriods) -> go.Figure:
+    mt = monthly_general_anesthesia_compare(df_dept, periods.recent_12mo, periods.prior_12mo)
     fig = go.Figure()
     fig.add_trace(
-        go.Scatter(x=labels, y=[int(cy_m.get(i, 0)) for i in months],
-                   mode="lines+markers", name=f"今年度 (FY{periods.fiscal_year})",
+        go.Scatter(x=mt["月ラベル"], y=mt["直近"],
+                   mode="lines+markers", name="直近12ヶ月",
                    line={"color": COLOR_PRIMARY, "width": 2.5}, marker={"size": 7})
     )
     fig.add_trace(
-        go.Scatter(x=labels, y=[int(ly_m.get(i, 0)) for i in months],
-                   mode="lines+markers", name=f"昨年度 (FY{periods.fiscal_year - 1})",
-                   line={"color": COLOR_LAST_YEAR, "width": 2, "dash": "dot"}, marker={"size": 6})
+        go.Scatter(x=mt["月ラベル"], y=mt["前期"],
+                   mode="lines+markers", name="その前12ヶ月",
+                   line={"color": COLOR_COMPARE, "width": 2, "dash": "dot"}, marker={"size": 6})
     )
-    return _common_layout(fig, title="月次 全麻手術件数（今年度 vs 昨年度）")
+    return _common_layout(fig, title="月次 全麻手術件数（直近12ヶ月 vs その前12ヶ月）")
 
 
-def _fig_category_bar_yoy(df_dept: pd.DataFrame, periods: FiscalYearPeriods) -> go.Figure:
-    cy = df_dept[(df_dept["手術実施日"] >= pd.Timestamp(periods.ytd[0]))
-                 & (df_dept["手術実施日"] <= pd.Timestamp(periods.ytd[1]))]
-    ly = df_dept[(df_dept["手術実施日"] >= pd.Timestamp(periods.last_year[0]))
-                 & (df_dept["手術実施日"] <= pd.Timestamp(periods.last_year[1]))]
-    cats = [c for c in CATEGORY_COLUMNS if c in df_dept.columns]
+def _fig_category_bar_3mo(df_dept: pd.DataFrame, periods: ReportPeriods) -> go.Figure:
+    cc = category_counts_compare_window(df_dept, periods.recent_3mo, periods.prior_3mo)
+    cats = cc["カテゴリ"].tolist() if not cc.empty else []
     labels = [CATEGORY_LABELS.get(c, c) for c in cats]
-    cy_vals = [int(cy[c].sum()) if not cy.empty else 0 for c in cats]
-    ly_vals = [int(ly[c].sum()) if not ly.empty else 0 for c in cats]
+    recent_vals = cc["直近件数"].tolist() if not cc.empty else []
+    prior_vals = cc["比較件数"].tolist() if not cc.empty else []
 
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=labels, y=ly_vals, name=f"昨年同期 (FY{periods.fiscal_year - 1})",
-                         marker_color=COLOR_LAST_YEAR, text=ly_vals, textposition="outside"))
-    fig.add_trace(go.Bar(x=labels, y=cy_vals, name=f"今年度YTD (FY{periods.fiscal_year})",
-                         marker_color=COLOR_PRIMARY, text=cy_vals, textposition="outside"))
+    fig.add_trace(go.Bar(x=labels, y=prior_vals, name="その前3ヶ月",
+                         marker_color=COLOR_COMPARE, text=prior_vals, textposition="outside"))
+    fig.add_trace(go.Bar(x=labels, y=recent_vals, name="直近3ヶ月",
+                         marker_color=COLOR_PRIMARY, text=recent_vals, textposition="outside"))
     fig.update_layout(barmode="group")
-    return _common_layout(fig, title="カテゴリ別 件数（今年度 vs 昨年同期）")
+    return _common_layout(fig, title="カテゴリ別 件数（直近3ヶ月 vs その前3ヶ月）")
 
 
-def _fig_category_monthly_yoy(df_dept: pd.DataFrame, periods: FiscalYearPeriods) -> go.Figure:
+def _fig_category_monthly_rolling(df_dept: pd.DataFrame, periods: ReportPeriods) -> go.Figure:
     """4 カテゴリの月次推移を 1 枚に subplot (2x2)。"""
     from plotly.subplots import make_subplots  # noqa: PLC0415
 
@@ -283,35 +249,20 @@ def _fig_category_monthly_yoy(df_dept: pd.DataFrame, periods: FiscalYearPeriods)
         vertical_spacing=0.18, horizontal_spacing=0.10,
     )
 
-    cy = df_dept[(df_dept["手術実施日"] >= pd.Timestamp(periods.ytd[0]))
-                 & (df_dept["手術実施日"] <= pd.Timestamp(periods.ytd[1]))]
-    ly = df_dept[(df_dept["手術実施日"] >= pd.Timestamp(periods.last_year[0]))
-                 & (df_dept["手術実施日"] <= pd.Timestamp(periods.last_year[1]))]
-
-    def _monthly_sum(slice_df: pd.DataFrame, col: str) -> dict[int, int]:
-        if slice_df.empty:
-            return {}
-        s = slice_df.set_index("手術実施日").resample("MS")[col].sum()
-        return {int((ts.month - 4) % 12): int(v) for ts, v in s.items()}
-
-    months = list(range(12))
-    labels = [f"{(i + 3) % 12 + 1} 月" for i in months]
-
     for i, cat in enumerate(cats[:4]):
         row, col = i // 2 + 1, i % 2 + 1
-        cy_m = _monthly_sum(cy, cat)
-        ly_m = _monthly_sum(ly, cat)
+        mt = monthly_category_compare(df_dept, periods.recent_12mo, periods.prior_12mo, cat)
         fig.add_trace(
-            go.Scatter(x=labels, y=[cy_m.get(m, 0) for m in months],
+            go.Scatter(x=mt["月ラベル"], y=mt["直近"],
                        mode="lines+markers", line={"color": COLOR_PRIMARY, "width": 2},
-                       marker={"size": 5}, showlegend=(i == 0), name="今年度"),
+                       marker={"size": 5}, showlegend=(i == 0), name="直近12ヶ月"),
             row=row, col=col,
         )
         fig.add_trace(
-            go.Scatter(x=labels, y=[ly_m.get(m, 0) for m in months],
+            go.Scatter(x=mt["月ラベル"], y=mt["前期"],
                        mode="lines+markers",
-                       line={"color": COLOR_LAST_YEAR, "width": 1.5, "dash": "dot"},
-                       marker={"size": 5}, showlegend=(i == 0), name="昨年度"),
+                       line={"color": COLOR_COMPARE, "width": 1.5, "dash": "dot"},
+                       marker={"size": 5}, showlegend=(i == 0), name="その前12ヶ月"),
             row=row, col=col,
         )
 
@@ -363,32 +314,42 @@ def _diff_span(diff: float | int, fmt: str = "int", unit: str = "") -> str:
     return f'<span class="{cls}">{body}{unit}</span>'
 
 
-def _kpi_card_yoy(label: str, ly: str, ytd: str, diff_html: str) -> str:
+def _kpi_card(label: str, comp_label: str, recent_label: str,
+              comp: str, recent: str, diff_html: str) -> str:
     return f"""
     <div class="kpi-card">
       <div class="kpi-label">{label}</div>
       <table class="kpi-yoy">
-        <tr><td>昨年同期</td><td class="num">{ly}</td></tr>
-        <tr><td>今年度YTD</td><td class="num"><strong>{ytd}</strong></td></tr>
+        <tr><td>{comp_label}</td><td class="num">{comp}</td></tr>
+        <tr><td>{recent_label}</td><td class="num"><strong>{recent}</strong></td></tr>
         <tr><td>差分</td><td class="num">{diff_html}</td></tr>
       </table>
     </div>
     """
 
 
-def _build_kpi_cards(kpi: dict, periods: FiscalYearPeriods) -> str:
-    ly, ytd, diff = kpi["last_year"], kpi["ytd"], kpi["diff"]
+def _build_kpi_cards(kpi: dict) -> str:
+    """KPI 4 枚 (直近3ヶ月 vs 昨年同3ヶ月)。`kpi` は kpi_overall_compare の戻り値。"""
+    comp = kpi["comparison"]
+    recent = kpi["recent"]
+    diff = kpi["diff"]
+    comp_label = "昨年同3ヶ月"
+    recent_label = "直近3ヶ月"
     return (
-        _kpi_card_yoy("件数", _fmt_int(ly["件数"]), _fmt_int(ytd["件数"]),
-                      _diff_span(diff["件数"], "int"))
-        + _kpi_card_yoy("平均手術時間 (分)", _fmt_float(ly["平均手術時間_分"]),
-                        _fmt_float(ytd["平均手術時間_分"]),
-                        _diff_span(diff["平均手術時間_分"], "minute"))
-        + _kpi_card_yoy("緊急比率", _fmt_pct(ly["緊急比率"]), _fmt_pct(ytd["緊急比率"]),
-                        _diff_span(diff["緊急比率"], "pct_point"))
-        + _kpi_card_yoy("全麻手術件数", _fmt_int(ly["全麻手術件数"]),
-                        _fmt_int(ytd["全麻手術件数"]),
-                        _diff_span(diff["全麻手術件数"], "int"))
+        _kpi_card("件数", comp_label, recent_label,
+                  _fmt_int(comp["件数"]), _fmt_int(recent["件数"]),
+                  _diff_span(diff["件数"], "int"))
+        + _kpi_card("平均手術時間 (分)", comp_label, recent_label,
+                    _fmt_float(comp["平均手術時間_分"]),
+                    _fmt_float(recent["平均手術時間_分"]),
+                    _diff_span(diff["平均手術時間_分"], "minute"))
+        + _kpi_card("緊急比率", comp_label, recent_label,
+                    _fmt_pct(comp["緊急比率"]), _fmt_pct(recent["緊急比率"]),
+                    _diff_span(diff["緊急比率"], "pct_point"))
+        + _kpi_card("全麻手術件数", comp_label, recent_label,
+                    _fmt_int(comp["全麻手術件数"]),
+                    _fmt_int(recent["全麻手術件数"]),
+                    _diff_span(diff["全麻手術件数"], "int"))
     )
 
 
@@ -397,8 +358,8 @@ def _build_doctor_table_lead(kpi_df: pd.DataFrame) -> str:
         return '<p class="muted">該当データなし</p>'
     rows = "\n".join(
         f"<tr><td class='num'>{int(r['順位'])}</td><td>{r['医師']}</td>"
-        f"<td class='num'>{int(r['今年度件数']):,}</td>"
-        f"<td class='num'>{int(r['昨年同期件数']):,}</td>"
+        f"<td class='num'>{int(r['直近件数']):,}</td>"
+        f"<td class='num'>{int(r['比較件数']):,}</td>"
         f"<td class='num'>{_diff_span(int(r['差分']), 'int')}</td>"
         f"<td class='num'>{r['平均時間_分']:.1f}</td>"
         f"<td class='num'>{int(r['緊急件数']):,}</td></tr>"
@@ -408,7 +369,7 @@ def _build_doctor_table_lead(kpi_df: pd.DataFrame) -> str:
     <table class="rank-table">
       <thead>
         <tr><th class="num">順位</th><th>医師</th>
-            <th class="num">今年度</th><th class="num">昨年同期</th><th class="num">差分</th>
+            <th class="num">直近3ヶ月</th><th class="num">前3ヶ月</th><th class="num">差分</th>
             <th class="num">平均(分)</th><th class="num">緊急</th></tr>
       </thead>
       <tbody>{rows}</tbody>
@@ -421,10 +382,10 @@ def _build_doctor_table_all(kpi_df: pd.DataFrame) -> str:
         return '<p class="muted">該当データなし</p>'
     rows = "\n".join(
         f"<tr><td class='num'>{int(r['順位'])}</td><td>{r['医師']}</td>"
-        f"<td class='num'>{int(r['今年執刀']):,}</td>"
-        f"<td class='num'>{int(r['今年助手']):,}</td>"
-        f"<td class='num'><strong>{int(r['今年合計']):,}</strong></td>"
-        f"<td class='num'>{int(r['昨年合計']):,}</td>"
+        f"<td class='num'>{int(r['直近執刀']):,}</td>"
+        f"<td class='num'>{int(r['直近助手']):,}</td>"
+        f"<td class='num'><strong>{int(r['直近合計']):,}</strong></td>"
+        f"<td class='num'>{int(r['比較合計']):,}</td>"
         f"<td class='num'>{_diff_span(int(r['差分']), 'int')}</td></tr>"
         for _, r in kpi_df.iterrows()
     )
@@ -432,8 +393,8 @@ def _build_doctor_table_all(kpi_df: pd.DataFrame) -> str:
     <table class="rank-table">
       <thead>
         <tr><th class="num">順位</th><th>医師</th>
-            <th class="num">今年執刀</th><th class="num">今年助手</th><th class="num">今年合計</th>
-            <th class="num">昨年合計</th><th class="num">差分</th></tr>
+            <th class="num">直近執刀</th><th class="num">直近助手</th><th class="num">直近合計</th>
+            <th class="num">前3ヶ月合計</th><th class="num">差分</th></tr>
       </thead>
       <tbody>{rows}</tbody>
     </table>
@@ -445,8 +406,8 @@ def _build_topn_table(df_topn: pd.DataFrame, name_column: str, title: str) -> st
         return f'<h3>{title}</h3><p class="muted">該当データなし</p>'
     rows = "\n".join(
         f"<tr><td class='num'>{i + 1}</td><td>{r[name_column]}</td>"
-        f"<td class='num'>{int(r['今年度件数']):,}</td>"
-        f"<td class='num'>{int(r['昨年同期件数']):,}</td>"
+        f"<td class='num'>{int(r['直近件数']):,}</td>"
+        f"<td class='num'>{int(r['比較件数']):,}</td>"
         f"<td class='num'>{_diff_span(int(r['差分']), 'int')}</td></tr>"
         for i, (_, r) in enumerate(df_topn.iterrows())
     )
@@ -455,7 +416,7 @@ def _build_topn_table(df_topn: pd.DataFrame, name_column: str, title: str) -> st
     <table class="topn-table">
       <thead>
         <tr><th class="num">#</th><th>{name_column}</th>
-            <th class="num">今年度</th><th class="num">昨年同期</th><th class="num">差分</th></tr>
+            <th class="num">直近3ヶ月</th><th class="num">前3ヶ月</th><th class="num">差分</th></tr>
       </thead>
       <tbody>{rows}</tbody>
     </table>
@@ -576,11 +537,11 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <section class="page">
   <h1>{dept} 手術実績レポート</h1>
   <p class="meta">
-    対象期間 {date_min} 〜 {date_max}（月締め）　／
-    比較 今年度YTD <strong>{ytd_str}</strong> vs 昨年同期 <strong>{ly_str}</strong>
+    データ範囲 {date_min} 〜 {date_max}（月締め cutoff {cutoff}）　／
+    KPI 比較: 直近3ヶ月 <strong>{recent_3mo_str}</strong> vs 昨年同3ヶ月 <strong>{yoy_3mo_str}</strong>
   </p>
 
-  <h2>全体 KPI（今年度 YTD vs 昨年同期）</h2>
+  <h2>全体 KPI（直近3ヶ月 vs 昨年同3ヶ月）</h2>
   <div class="kpi-grid">
     {kpi_cards}
   </div>
@@ -591,7 +552,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
 <!-- Page 2: 全麻手術件数 vs 目標 -->
 <section class="page">
-  <h2>全身麻酔手術件数 vs 目標（週次）</h2>
+  <h2>全身麻酔手術件数 vs 目標（週次・直近12週）</h2>
   <div class="target-summary">
     {target_summary}
   </div>
@@ -601,20 +562,20 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
 <!-- Page 3: 術者ランキング -->
 <section class="page">
-  <h2>執刀医ランキング（執刀医のみ、上位 20）</h2>
+  <h2>執刀医ランキング（執刀医のみ・上位 20、直近3ヶ月 vs その前3ヶ月）</h2>
   {table_lead}
 
-  <h2>執刀＋助手 参加件数（上位 20）</h2>
+  <h2>執刀＋助手 参加件数（上位 20、直近3ヶ月 vs その前3ヶ月）</h2>
   {table_all}
 </section>
 
 <!-- Page 4: カテゴリ・術式 -->
 <section class="page">
-  <h2>カテゴリ別 件数</h2>
+  <h2>カテゴリ別 件数（直近3ヶ月 vs その前3ヶ月）</h2>
   <img class="chart" src="{img_category_bar}" alt="カテゴリ別件数">
   <img class="chart" src="{img_category_monthly}" alt="カテゴリ別月次">
 
-  <h2>主要術式・術後病名（今年度 YTD ベース 上位 10）</h2>
+  <h2>主要術式・術後病名（直近3ヶ月 上位 10、その前3ヶ月件数を併記）</h2>
   <div class="target-pair">
     <div>{table_procedures}</div>
     <div>{table_diagnoses}</div>
@@ -632,63 +593,63 @@ def _format_period(p: tuple[date, date]) -> str:
 
 def _build_target_summary(
     df_dept: pd.DataFrame,
-    periods: FiscalYearPeriods,
+    periods: ReportPeriods,
     target: int | None,
 ) -> str:
     if target is None:
         return '<span class="muted">目標未設定（実績のみ表示）</span>'
 
-    ytd_wk = weekly_general_anesthesia(df_dept, periods.ytd, target=target)
-    ly_wk = weekly_general_anesthesia(df_dept, periods.last_year, target=target)
-
-    def _summary(wk: pd.DataFrame) -> str:
-        if wk.empty:
-            return "対象週なし"
-        achieved = int(wk["達成"].sum())
-        total = len(wk)
-        pct = (achieved / total * 100) if total else 0.0
-        return f"達成 <strong>{achieved}</strong> 週 / {total} 週（{pct:.1f}%）"
-
+    wk = weekly_general_anesthesia(df_dept, periods.weekly_12w, target=target)
+    if wk.empty:
+        return f"目標 <strong>{target} 件/週</strong>　｜　対象週なし"
+    achieved = int(wk["達成"].sum())
+    total = len(wk)
+    pct = (achieved / total * 100) if total else 0.0
     return (
         f"目標 <strong>{target} 件/週</strong>　"
-        f"｜　今年度YTD: {_summary(ytd_wk)}　"
-        f"｜　昨年同期: {_summary(ly_wk)}"
+        f"｜　直近12週: 達成 <strong>{achieved}</strong> 週 / {total} 週（{pct:.1f}%）"
     )
 
 
 def render_dept_html(
     df_dept: pd.DataFrame,
     dept: str,
-    periods: FiscalYearPeriods,
+    periods: ReportPeriods,
     target: int | None,
     generated_at: datetime,
 ) -> str:
-    kpi = kpi_overall_yoy(df_dept, periods)
+    kpi = kpi_overall_compare(df_dept, periods.recent_3mo, periods.yoy_3mo)
 
     img_monthly_count = _fig_to_data_uri(
-        _fig_monthly_count_yoy(df_dept, periods), width=950, height=240)
+        _fig_monthly_count_rolling(df_dept, periods), width=950, height=240)
     img_monthly_avg = _fig_to_data_uri(
-        _fig_monthly_avg_time_yoy(df_dept, periods), width=950, height=240)
+        _fig_monthly_avg_time_rolling(df_dept, periods), width=950, height=240)
     img_weekly_ga = _fig_to_data_uri(
         _fig_weekly_ga_vs_target(df_dept, periods, target), width=1000, height=300)
     img_monthly_ga = _fig_to_data_uri(
-        _fig_monthly_ga_yoy(df_dept, periods), width=950, height=260)
+        _fig_monthly_ga_rolling(df_dept, periods), width=950, height=260)
     img_category_bar = _fig_to_data_uri(
-        _fig_category_bar_yoy(df_dept, periods), width=950, height=240)
+        _fig_category_bar_3mo(df_dept, periods), width=950, height=240)
     img_category_monthly = _fig_to_data_uri(
-        _fig_category_monthly_yoy(df_dept, periods), width=950, height=320)
+        _fig_category_monthly_rolling(df_dept, periods), width=950, height=320)
 
-    kpi_cards = _build_kpi_cards(kpi, periods)
+    kpi_cards = _build_kpi_cards(kpi)
 
     table_lead = _build_doctor_table_lead(
-        kpi_per_doctor_yoy(df_dept, periods, mode="lead_only", top_n=20))
+        kpi_per_doctor_compare_window(
+            df_dept, periods.recent_3mo, periods.prior_3mo,
+            mode="lead_only", top_n=20))
     table_all = _build_doctor_table_all(
-        kpi_per_doctor_yoy(df_dept, periods, mode="all", top_n=20))
+        kpi_per_doctor_compare_window(
+            df_dept, periods.recent_3mo, periods.prior_3mo,
+            mode="all", top_n=20))
 
     table_procedures = _build_topn_table(
-        top_n_procedures(df_dept, periods, n=10), "確定術式", "主要術式 top 10")
+        top_n_procedures(df_dept, periods.recent_3mo, periods.prior_3mo, n=10),
+        "確定術式", "主要術式 top 10")
     table_diagnoses = _build_topn_table(
-        top_n_postop_diagnoses(df_dept, periods, n=10), "術後病名", "主要術後病名 top 10")
+        top_n_postop_diagnoses(df_dept, periods.recent_3mo, periods.prior_3mo, n=10),
+        "術後病名", "主要術後病名 top 10")
 
     target_summary = _build_target_summary(df_dept, periods, target)
 
@@ -699,8 +660,9 @@ def render_dept_html(
         dept=dept,
         date_min=date_min,
         date_max=date_max,
-        ytd_str=_format_period(periods.ytd),
-        ly_str=_format_period(periods.last_year),
+        cutoff=periods.cutoff.isoformat(),
+        recent_3mo_str=_format_period(periods.recent_3mo),
+        yoy_3mo_str=_format_period(periods.yoy_3mo),
         generated_at=generated_at.strftime("%Y-%m-%d"),
         kpi_cards=kpi_cards,
         img_monthly_count=img_monthly_count,
@@ -726,7 +688,7 @@ def render_dept_pdf(
     df_dept: pd.DataFrame,
     dept: str,
     output_path: Path,
-    periods: FiscalYearPeriods,
+    periods: ReportPeriods,
     target: int | None,
     generated_at: datetime | None = None,
 ) -> Path:
@@ -742,6 +704,18 @@ def render_dept_pdf(
     return output_path
 
 
+def _cases_in_report_window(df_dept: pd.DataFrame, periods: ReportPeriods) -> int:
+    """レポート最大窓（直近24ヶ月 = recent_12mo + prior_12mo）に入る件数を返す。
+
+    PDF の各セクションは 3ヶ月窓 / 12ヶ月窓 / 12週窓を使う。24ヶ月窓は最も広く、
+    どこかにデータがあるかどうかの判定に適切。
+    """
+    d = df_dept["手術実施日"]
+    r12 = (d >= pd.Timestamp(periods.recent_12mo[0])) & (d <= pd.Timestamp(periods.recent_12mo[1]))
+    p12 = (d >= pd.Timestamp(periods.prior_12mo[0])) & (d <= pd.Timestamp(periods.prior_12mo[1]))
+    return int((r12 | p12).sum())
+
+
 def export_all(
     parquet_path: Path,
     output_dir: Path,
@@ -754,12 +728,14 @@ def export_all(
 
     - `only_dept`: 指定診療科のみ出力
     - `today` None なら現在日時を使用
-    - 件数 < `min_cases` の診療科は skip
+    - 対象期間（直近24ヶ月）の件数 < `min_cases` の診療科は skip
     """
+    import kaleido  # noqa: PLC0415
+
     df = pd.read_parquet(parquet_path)
     if today is None:
         today = date.today()
-    periods = fiscal_year_periods(today)
+    periods = report_periods(today)
     targets = load_dept_targets(targets_path)
 
     if only_dept is not None:
@@ -771,23 +747,30 @@ def export_all(
     generated_at = datetime.now()
     written: list[Path] = []
 
-    for dept in depts:
-        df_d = df[df["実施診療科"] == dept]
-        n = len(df_d)
-        if n < min_cases:
-            logger.info("skip: %s (件数 %d < %d)", dept, n, min_cases)
-            continue
-        target = targets.get(dept)
-        out = output_dir / f"{dept}.pdf"
-        try:
-            render_dept_pdf(
-                df_d, dept, out, periods,
-                target=target.weekly_general_anesthesia if target else None,
-                generated_at=generated_at,
-            )
-            written.append(out)
-            logger.info("出力: %s (件数 %d)", out, n)
-        except Exception:
-            logger.exception("PDF 生成失敗: %s", dept)
+    kaleido.start_sync_server(silence_warnings=True)
+    try:
+        for dept in depts:
+            df_d = df[df["実施診療科"] == dept]
+            n_window = _cases_in_report_window(df_d, periods)
+            if n_window < min_cases:
+                logger.info(
+                    "skip: %s (対象期間件数 %d < %d / 全期間 %d)",
+                    dept, n_window, min_cases, len(df_d),
+                )
+                continue
+            target = targets.get(dept)
+            out = output_dir / f"{dept}.pdf"
+            try:
+                render_dept_pdf(
+                    df_d, dept, out, periods,
+                    target=target.weekly_general_anesthesia if target else None,
+                    generated_at=generated_at,
+                )
+                written.append(out)
+                logger.info("出力: %s (対象期間件数 %d)", out, n_window)
+            except Exception:
+                logger.exception("PDF 生成失敗: %s", dept)
+    finally:
+        kaleido.stop_sync_server()
 
     return written

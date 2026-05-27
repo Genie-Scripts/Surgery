@@ -10,20 +10,25 @@ import pytest
 from src.aggregate import (
     CATEGORY_COLUMNS,
     category_counts,
+    category_counts_compare_window,
     category_counts_period_compare,
     category_monthly_trend,
     expand_operators,
     fiscal_year_periods,
     is_general_anesthesia,
     kpi_overall,
+    kpi_overall_compare,
     kpi_overall_period_compare,
-    kpi_overall_yoy,
     kpi_per_doctor,
     kpi_per_doctor_compare,
-    kpi_per_doctor_yoy,
+    kpi_per_doctor_compare_window,
     month_end_cutoff,
-    monthly_count_by_fiscal_year,
+    monthly_avg_time_compare,
+    monthly_category_compare,
+    monthly_count_compare,
+    monthly_general_anesthesia_compare,
     monthly_trend,
+    report_periods,
     top_n_postop_diagnoses,
     top_n_procedures,
     weekly_general_anesthesia,
@@ -532,101 +537,160 @@ def _make_yoy_df():
     return pd.DataFrame(rows)
 
 
-def test_kpi_overall_yoy_basic():
+def test_report_periods_mid_fy():
+    """2026-05-27 → cutoff 2026-04-30, 各窓を確認。"""
+    p = report_periods(date(2026, 5, 27))
+    assert p.cutoff == date(2026, 4, 30)
+    assert p.fiscal_year == 2026
+    # 直近3ヶ月: 2/1〜4/30
+    assert p.recent_3mo == (date(2026, 2, 1), date(2026, 4, 30))
+    # その前3ヶ月: 11/1〜1/31
+    assert p.prior_3mo == (date(2025, 11, 1), date(2026, 1, 31))
+    # 昨年同3ヶ月: 2025-02-01〜2025-04-30
+    assert p.yoy_3mo == (date(2025, 2, 1), date(2025, 4, 30))
+    # 直近12ヶ月
+    assert p.recent_12mo == (date(2025, 5, 1), date(2026, 4, 30))
+    # その前12ヶ月
+    assert p.prior_12mo == (date(2024, 5, 1), date(2025, 4, 30))
+    # 直近12週は月曜起算で 12 週幅
+    days = (p.weekly_12w[1] - p.weekly_12w[0]).days
+    assert days >= 11 * 7  # 少なくとも 11 週分 + α
+
+
+def test_kpi_overall_compare_basic():
     df = _make_yoy_df()
-    p = fiscal_year_periods(date(2026, 5, 27))
-    k = kpi_overall_yoy(df, p)
-    assert k["ytd"]["件数"] == 3
-    assert k["ytd"]["全麻手術件数"] == 2
-    assert k["ytd"]["緊急比率"] == pytest.approx(1 / 3)
-    assert k["last_year"]["件数"] == 2
-    assert k["last_year"]["全麻手術件数"] == 1
+    p = report_periods(date(2026, 5, 27))
+    # recent_3mo (2-4月) には 4月の 3 件のみ入る、yoy_3mo (2025-2~4) には 4月の 2 件
+    k = kpi_overall_compare(df, p.recent_3mo, p.yoy_3mo)
+    assert k["recent"]["件数"] == 3
+    assert k["recent"]["全麻手術件数"] == 2
+    assert k["recent"]["緊急比率"] == pytest.approx(1 / 3)
+    assert k["comparison"]["件数"] == 2
+    assert k["comparison"]["全麻手術件数"] == 1
     assert k["diff"]["件数"] == 1
-    assert k["diff"]["全麻手術件数"] == 1
 
 
-def test_monthly_count_by_fiscal_year_all_12_months_present():
+def test_monthly_count_compare_aligns_two_windows():
+    """直近12ヶ月 (2025-05〜2026-04) vs その前12ヶ月 (2024-05〜2025-04) を並列化。"""
     df = _make_yoy_df()
-    p = fiscal_year_periods(date(2026, 5, 27))
-    out = monthly_count_by_fiscal_year(df, p)
+    p = report_periods(date(2026, 5, 27))
+    out = monthly_count_compare(df, p.recent_12mo, p.prior_12mo)
     assert len(out) == 12
-    # 4 月 (オフセット 0) のみ件数あり
-    apr = out[out["月オフセット"] == 0].iloc[0]
-    assert apr["今年度件数"] == 3
-    assert apr["昨年度件数"] == 2
-    # 他の月は 0
-    others = out[out["月オフセット"] != 0]
-    assert (others["今年度件数"] == 0).all()
-    assert (others["昨年度件数"] == 0).all()
+    # recent 側の月オフセット 11 (= 2026-04) に 3 件、対応する prior 側 (= 2025-04) に 2 件
+    last = out.iloc[-1]
+    assert last["月ラベル"] == "2026-04"
+    assert last["直近"] == 3
+    assert last["前期"] == 2
 
 
 def test_weekly_general_anesthesia_with_target():
     df = _make_yoy_df()
-    p = fiscal_year_periods(date(2026, 5, 27))
-    wk = weekly_general_anesthesia(df, p.ytd, target=1)
-    # 4/1〜4/30 を含む全週が出る（4 月の月曜は 6/13/20/27 と 3/30）
+    p = report_periods(date(2026, 5, 27))
+    wk = weekly_general_anesthesia(df, p.recent_12mo, target=1)
     assert not wk.empty
     assert "達成" in wk.columns
-    # 全麻 2 件 (4/10 木, 4/15 水) → 4/6 週と 4/13 週 がそれぞれ 1 件
+    # 全麻 2 件 (4/10 木, 4/15 水) → 2 週で達成
     total_ga = wk["全麻件数"].sum()
     assert total_ga == 2
-    # target=1 で達成週が 2 週ある
     assert wk["達成"].sum() == 2
 
 
 def test_weekly_general_anesthesia_no_target():
     df = _make_yoy_df()
-    p = fiscal_year_periods(date(2026, 5, 27))
-    wk = weekly_general_anesthesia(df, p.ytd, target=None)
+    p = report_periods(date(2026, 5, 27))
+    wk = weekly_general_anesthesia(df, p.weekly_12w, target=None)
     assert "達成" not in wk.columns
     assert "目標" not in wk.columns
 
 
-def test_top_n_procedures_with_yoy():
+def test_top_n_procedures_compare():
     df = _make_yoy_df()
-    p = fiscal_year_periods(date(2026, 5, 27))
-    out = top_n_procedures(df, p, n=5)
-    # 今年度: 術式X=2, 術式Y=1 / 昨年同期: 術式X=1, 術式Z=1
+    p = report_periods(date(2026, 5, 27))
+    # recent_3mo (2026-2〜4) と yoy_3mo (2025-2〜4) を渡す → 昨年同期比較
+    out = top_n_procedures(df, p.recent_3mo, p.yoy_3mo, n=5)
     out_by = out.set_index("確定術式")
-    assert out_by.loc["術式X", "今年度件数"] == 2
-    assert out_by.loc["術式X", "昨年同期件数"] == 1
+    assert out_by.loc["術式X", "直近件数"] == 2
+    assert out_by.loc["術式X", "比較件数"] == 1
     assert out_by.loc["術式X", "差分"] == 1
-    assert out_by.loc["術式Y", "今年度件数"] == 1
-    assert out_by.loc["術式Y", "昨年同期件数"] == 0
+    assert out_by.loc["術式Y", "直近件数"] == 1
+    assert out_by.loc["術式Y", "比較件数"] == 0
 
 
-def test_top_n_postop_diagnoses_with_yoy():
+def test_top_n_postop_diagnoses_compare():
     df = _make_yoy_df()
-    p = fiscal_year_periods(date(2026, 5, 27))
-    out = top_n_postop_diagnoses(df, p, n=5)
+    p = report_periods(date(2026, 5, 27))
+    out = top_n_postop_diagnoses(df, p.recent_3mo, p.yoy_3mo, n=5)
     out_by = out.set_index("術後病名")
-    assert out_by.loc["病名X", "今年度件数"] == 2
+    assert out_by.loc["病名X", "直近件数"] == 2
 
 
-def test_kpi_per_doctor_yoy_lead_only():
+def test_kpi_per_doctor_compare_window_lead_only():
     df = _make_yoy_df()
-    p = fiscal_year_periods(date(2026, 5, 27))
-    out = kpi_per_doctor_yoy(df, p, mode="lead_only", top_n=10)
+    p = report_periods(date(2026, 5, 27))
+    out = kpi_per_doctor_compare_window(
+        df, p.recent_3mo, p.yoy_3mo, mode="lead_only", top_n=10,
+    )
     assert list(out.columns) == [
-        "順位", "医師", "今年度件数", "昨年同期件数", "差分", "平均時間_分", "緊急件数",
+        "順位", "医師", "直近件数", "比較件数", "差分", "平均時間_分", "緊急件数",
     ]
     by = out.set_index("医師")
-    # 今年度: 医A=2(術式X×2), 医B=1
-    assert by.loc["医A", "今年度件数"] == 2
-    assert by.loc["医A", "昨年同期件数"] == 1
-    assert by.loc["医B", "今年度件数"] == 1
+    assert by.loc["医A", "直近件数"] == 2
+    assert by.loc["医A", "比較件数"] == 1
+    assert by.loc["医B", "直近件数"] == 1
     assert by.loc["医B", "緊急件数"] == 1
 
 
-def test_kpi_per_doctor_yoy_all_includes_assistants():
+def test_kpi_per_doctor_compare_window_all_includes_assistants():
     df = _make_yoy_df()
-    p = fiscal_year_periods(date(2026, 5, 27))
-    out = kpi_per_doctor_yoy(df, p, mode="all", top_n=10)
+    p = report_periods(date(2026, 5, 27))
+    out = kpi_per_doctor_compare_window(
+        df, p.recent_3mo, p.yoy_3mo, mode="all", top_n=10,
+    )
     assert list(out.columns) == [
-        "順位", "医師", "今年執刀", "今年助手", "今年合計", "昨年合計", "差分",
+        "順位", "医師", "直近執刀", "直近助手", "直近合計", "比較合計", "差分",
     ]
     by = out.set_index("医師")
-    # 医A: 執刀 2 件 + 助手 1 件 = 合計 3
-    assert by.loc["医A", "今年執刀"] == 2
-    assert by.loc["医A", "今年助手"] == 1
-    assert by.loc["医A", "今年合計"] == 3
+    assert by.loc["医A", "直近執刀"] == 2
+    assert by.loc["医A", "直近助手"] == 1
+    assert by.loc["医A", "直近合計"] == 3
+
+
+def test_category_counts_compare_window():
+    df = _make_yoy_df()
+    p = report_periods(date(2026, 5, 27))
+    out = category_counts_compare_window(df, p.recent_3mo, p.yoy_3mo)
+    by = out.set_index("カテゴリ")
+    # 今年度 4月: malignant_tumor 2件, artificial_joint 1件 / 2025年4月: malignant_tumor 0, artificial_joint 1
+    assert by.loc["malignant_tumor", "直近件数"] == 2
+    assert by.loc["malignant_tumor", "比較件数"] == 0
+    assert by.loc["artificial_joint", "直近件数"] == 1
+    assert by.loc["artificial_joint", "比較件数"] == 1
+
+
+def test_monthly_avg_time_compare_returns_12_rows():
+    df = _make_yoy_df()
+    p = report_periods(date(2026, 5, 27))
+    out = monthly_avg_time_compare(df, p.recent_12mo, p.prior_12mo)
+    assert len(out) == 12
+    assert "直近" in out.columns and "前期" in out.columns
+
+
+def test_monthly_general_anesthesia_compare():
+    df = _make_yoy_df()
+    p = report_periods(date(2026, 5, 27))
+    out = monthly_general_anesthesia_compare(df, p.recent_12mo, p.prior_12mo)
+    assert len(out) == 12
+    last = out.iloc[-1]
+    # 2026-04 に全麻 2 件、2025-04 に全麻 1 件
+    assert last["直近"] == 2
+    assert last["前期"] == 1
+
+
+def test_monthly_category_compare():
+    df = _make_yoy_df()
+    p = report_periods(date(2026, 5, 27))
+    out = monthly_category_compare(df, p.recent_12mo, p.prior_12mo, "malignant_tumor")
+    assert len(out) == 12
+    last = out.iloc[-1]
+    assert last["直近"] == 2  # 2026-04 の malignant_tumor=True が 2 件
+    assert last["前期"] == 0
