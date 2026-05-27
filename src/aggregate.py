@@ -511,6 +511,9 @@ def _align_two_windows(
 ) -> pd.DataFrame:
     """recent / prior 窓の月系列を「窓内のオフセット」で並列に並べる。
 
+    `recent_series` / `prior_series` の値が pd.NA / NaN の場合は `fill` で置換する。
+    （pd.NA は plotly→kaleido 経由の orjson でシリアライズできないため）
+
     返却列: 月オフセット, 月ラベル (YYYY-MM, recent 側), 直近, 前期
     """
     r_months = _month_iter(recent_window)
@@ -522,6 +525,10 @@ def _align_two_windows(
         pm = p_months[i]
         r_val = recent_series.get(rm, fill)
         p_val = prior_series.get(pm, fill)
+        if pd.isna(r_val):
+            r_val = fill
+        if pd.isna(p_val):
+            p_val = fill
         rows.append(
             {
                 "月オフセット": i,
