@@ -80,7 +80,7 @@ def _cmd_classify(args: argparse.Namespace) -> int:
             df = classify_with_llm(df, load_rules(), client)
             logger.info("LLM 第 2 段適用済 (キャッシュ＋ハードガード経由)")
         else:
-            logger.warning("Ollama 未起動 → regex 第 1 段のみで進行")
+            logger.warning("oMLX 未起動/利用不可 → regex 第 1 段のみで進行")
             df["分類元"] = "regex"
     else:
         df["分類元"] = "regex"

@@ -176,8 +176,8 @@ Outpatient-Dashboard の鉄則を踏襲：
 | UI | **Streamlit** | 最速で動くもの優先 |
 | 集計 | pandas | |
 | グラフ | Plotly（推奨）or Altair | Streamlit との親和性 |
-| LLM ランタイム | Ollama（既導入） | OpenAI 互換 API 経由 |
-| LLM モデル | **`hf.co/mmnga/Llama-3.1-Swallow-8B-Instruct-v0.5-gguf:Q6_K`** | Outpatient-Dashboard の Phase A.0 で実績あり：100% 採用率・3.4s/件・行混同型ソフトハルシは要注意 |
+| LLM ランタイム | oMLX（既導入） | OpenAI 互換 API（`localhost:8000/v1`、Bearer 認証） |
+| LLM モデル | **`Llama-3.1-Swallow-8B-Instruct-v0.5`**（oMLX 配信 id） | Outpatient-Dashboard の Phase A.0 で実績あり：100% 採用率・行混同型ソフトハルシは要注意。旧 Ollama の `hf.co/...:Q6_K` から移行 |
 | データストア | CSV 直読み | Shift-JIS / UTF-8 自動判別 |
 | LLM キャッシュ | JSON ファイル（sha256(name+rules+model)） | Outpatient-Dashboard の `data/llm_cache/` パターン踏襲 |
 | テスト | pytest | tests/ 配下 |
@@ -363,7 +363,7 @@ Surgery/
 │   ├── classify.py            # カテゴリ抽出 第 1 段（regex + categories.yaml）
 │   ├── classify_llm.py        # カテゴリ抽出 第 2 段（LLM + ハードガード + 永続キャッシュ）
 │   ├── aggregate.py           # KPI 集計純関数群（kpi_overall / monthly_trend / kpi_per_doctor / kpi_per_doctor_compare / category_monthly_trend 等）
-│   ├── llm_client.py          # Ollama / OpenAI 互換クライアント（Outpatient から移植・簡素化）
+│   ├── llm_client.py          # oMLX (OpenAI 互換) クライアント（Outpatient から移植・簡素化）
 │   ├── anonymize.py           # 生 CSV → 匿名化済み CSV（master_key 永続化、複数ファイル concat）
 │   ├── cli.py                 # 統合 CLI（anonymize / classify / summary）
 │   ├── ui/                    # Streamlit 共通 UI コンポーネント
@@ -386,7 +386,7 @@ Surgery/
 │
 ├── config/
 │   ├── categories.yaml        # カテゴリ抽出ルール
-│   ├── llm_config.yaml        # Ollama 接続設定
+│   ├── llm_config.yaml        # oMLX 接続設定
 │   └── peers.csv              # 同僚比較対象（必要に応じて）
 │
 ├── data/
@@ -418,7 +418,7 @@ Surgery/
 ## 10. 制約・前提
 - 動作環境: 自分の MacBook Pro M5 Pro 64GB のみ
 - アクセス制御: 不要（ローカル）／公開版は閲覧のみ
-- 外部 API 課金: 発生させない（Ollama ローカルのみ）
+- 外部 API 課金: 発生させない（oMLX ローカルのみ）
 - 既存 Outpatient-Dashboard / Outpatient-Restructuring とは独立リポジトリ
 - 個人開発・自分用ユーティリティとしての実装精度（業務利用は当面 90% 程度）
 
@@ -448,5 +448,5 @@ OQ-1・5・6・8 解決済み（実 CSV 確認）。残る検討事項は OQ-2 /
 - [x] OQ-5・OQ-6・OQ-8 解決済み（2026-04-30）
 - [ ] `.gitignore` に `data/raw/`・`local/`・補助対応表が含まれている
 - [ ] `config/categories.yaml` のカテゴリ定義初版が固まっている（ロボット 2 サブカテゴリ反映）
-- [ ] LLM モデルが Ollama で pull 済み (`ollama list` で確認)
+- [ ] LLM モデルが oMLX で配信済み (`/v1/models` で id 完全一致を確認)
 - [ ] サンプル 100 件で regex 第 1 段の精度ざっくり確認

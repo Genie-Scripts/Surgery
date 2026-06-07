@@ -16,7 +16,7 @@
 | 入力 | 手術データ CSV（術者 ID 事前匿名化済み） |
 | 抽出カテゴリ | 悪性腫瘍 / 人工関節 / ロボット支援（MVP） |
 | KPI | 件数 / 総手術時間 / 平均手術時間 / 月次推移 / 同僚比較 / 難度補正 |
-| LLM | Ollama + Llama-3.1-Swallow-8B-Instruct-v0.5 (Q6_K) |
+| LLM | oMLX + Llama-3.1-Swallow-8B-Instruct-v0.5 |
 | UI | Streamlit |
 
 ---
@@ -25,8 +25,8 @@
 
 - macOS（Apple Silicon 推奨）
 - Python 3.11 以上
-- [Ollama](https://ollama.com/)（既導入想定）
-- メモリ 16GB 以上（Q6_K 推奨は 64GB）
+- oMLX（OpenAI 互換ローカル LLM サーバ、`http://localhost:8000/v1`。既導入想定）
+- メモリ 16GB 以上（推奨 64GB）
 
 ---
 
@@ -58,26 +58,25 @@ pip install --upgrade pip
 pip install -e '.[dev]'   # pyproject.toml の依存を取り込む（実装着手後）
 ```
 
-### 3. Ollama モデルを pull
+### 3. oMLX にモデルを用意
 
-Phase A（カテゴリ自動判定）で使用する LLM をローカルにダウンロード：
-
-```bash
-ollama pull hf.co/mmnga/Llama-3.1-Swallow-8B-Instruct-v0.5-gguf:Q6_K
-```
-
-Ollama サーバが未起動なら自動で起動する仕組みを `src/llm_client.py` に内包する予定（Outpatient-Dashboard と同パターン）。手動起動する場合：
+Phase A（カテゴリ自動判定）で使用する LLM `Llama-3.1-Swallow-8B-Instruct-v0.5` を
+oMLX に配信しておく（oMLX アプリのモデル管理で取得）。配信中モデルは確認できる：
 
 ```bash
-ollama serve
+curl -s http://localhost:8000/v1/models -H "Authorization: Bearer $OMLX_API_KEY"
 ```
+
+oMLX が未起動なら `src/llm_client.py` が `open -a oMLX` で起動を試み、最大 30 秒待機する
+（Outpatient-Dashboard と同パターン）。認証キーは `OMLX_API_KEY` env か
+`~/.omlx/settings.json` の `auth.api_key` から自動解決する。
 
 ### 4. 設定ファイル（実装着手後に整備）
 
 ```
 config/
 ├── categories.yaml        # カテゴリ抽出ルール（YAML）
-├── llm_config.yaml        # Ollama 接続設定
+├── llm_config.yaml        # oMLX 接続設定
 └── peers.csv              # 同僚比較対象（必要に応じ）
 ```
 
@@ -114,7 +113,7 @@ streamlit run app/main.py
 
 サイドバー共通フィルタ（**ページ切替後も維持**される）:
 - **CSV パス**: デフォルトは `data/raw/anonymized/anonymized_data.csv`（無ければルート直下の `anonymized_data.csv`）
-- **LLM 第 2 段を適用**（Swallow-8B + ハードガード。Ollama 未起動時は自動で regex のみに降格）
+- **LLM 第 2 段を適用**（Swallow-8B + ハードガード。oMLX 未起動/利用不可時は自動で regex のみに降格）
 - **執刀医モード**（`執刀医のみ` / `執刀医＋助手を含む`）
 - **申込区分** / **実施診療科** / **全身麻酔のみ** で絞り込み
 - **期間比較**（expander で展開、術者別ページに比較表が表示）
@@ -226,7 +225,7 @@ Surgery/
 │   ├── classify.py     # カテゴリ抽出 第 1 段（regex + categories.yaml）
 │   ├── classify_llm.py # カテゴリ抽出 第 2 段（LLM + ハードガード + 永続キャッシュ）
 │   ├── aggregate.py    # KPI 集計純関数群
-│   ├── llm_client.py   # Ollama / OpenAI 互換クライアント
+│   ├── llm_client.py   # oMLX (OpenAI 互換) クライアント
 │   ├── anonymize.py    # 生 CSV → 匿名化済み CSV
 │   ├── cli.py          # 統合 CLI（anonymize / classify / summary / export-html）
 │   ├── export_html.py  # 公開用静的 HTML 生成（Plotly + 3 期間比較トグル）
@@ -284,13 +283,15 @@ Surgery/
 
 ## トラブルシューティング
 
-### Ollama に接続できない
+### oMLX に接続できない
 
 ```bash
-curl http://localhost:11434/
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/v1/models \
+  -H "Authorization: Bearer $OMLX_API_KEY"
 ```
 
-200 が返らない場合は `ollama serve` を別ターミナルで起動。
+200 が返らない場合は oMLX アプリを起動（`open -a oMLX`）。401 ならキー不一致なので
+`OMLX_API_KEY` か `~/.omlx/settings.json` の `auth.api_key` を確認。
 
 ### Streamlit のポートが占有されている
 
@@ -300,7 +301,7 @@ streamlit run app/main.py --server.port 8502
 
 ### LLM 出力が定型文（フォールバック）ばかりになる
 
-`config/llm_config.yaml` のモデル名を確認し、`ollama list` で pull 済みかチェック。Outpatient-Dashboard と同様、思考型モデルではなく **instruct** 系（Swallow / Qwen-Instruct）を使うこと。
+`config/llm_config.yaml` のモデル名が oMLX 配信 id と完全一致するか `/v1/models` で確認（旧 Ollama の `hf.co/...:Q6_K` 形式は 404）。Outpatient-Dashboard と同様、思考型モデルではなく **instruct** 系（Swallow / Qwen-Instruct）を使うこと。
 
 ---
 

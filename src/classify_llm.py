@@ -101,16 +101,24 @@ def _parse_response(text: str, valid_ids: set[str]) -> list[str] | None:
     """`CATEGORIES: [id1, id2]` 形式から ID リストを抽出。
 
     複数出現する場合は最後を採用（思考型モデルが CoT 中で自言及するケース対策）。
-    valid_ids にない ID は除去するが、空リストとの区別のため `None` は返さず `[]` を返す。
-    パース不能なら `None`。
+    角括弧を落とした `CATEGORIES: id1, id2`（oMLX 版 Swallow が稀に出す）も許容する。
+    valid_ids にない ID は除去するが、空リストとの区別のため該当なしは `[]` を返し、
+    `CATEGORIES` 自体が見つからない場合のみ `None`（パース不能）を返す。
     """
-    matches = list(re.finditer(r"CATEGORIES[:：]\s*\[([^\]]*)\]", text))
-    if not matches:
-        return None
-    inner = matches[-1].group(1).strip()
+    # 1) 角括弧つき（最も確実）を優先し、複数あれば最後を採用
+    bracket = list(re.finditer(r"CATEGORIES[:：]\s*\[([^\]]*)\]", text))
+    if bracket:
+        inner = bracket[-1].group(1)
+    else:
+        # 2) 角括弧なしフォールバック: `CATEGORIES:` 以降のその 1 行を採用
+        plain = list(re.finditer(r"CATEGORIES[:：]\s*(.+)", text))
+        if not plain:
+            return None
+        inner = plain[-1].group(1).split("\n", 1)[0].strip("[] ")
+    inner = inner.strip()
     if not inner:
         return []
-    ids = [token.strip().strip("'\"") for token in inner.split(",")]
+    ids = [token.strip().strip("'\"[] ") for token in inner.split(",")]
     return [i for i in ids if i in valid_ids]
 
 

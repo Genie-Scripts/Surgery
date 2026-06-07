@@ -75,7 +75,7 @@ def _load_pipeline_cached(
             status = "LLM 第 2 段適用済 (キャッシュ＋ハードガード経由)"
         else:
             df["分類元"] = "regex"
-            status = "Ollama 未起動 → regex 第 1 段のみ"
+            status = "oMLX 未起動/利用不可 → regex 第 1 段のみ"
     else:
         df["分類元"] = "regex"
         status = "LLM スキップ → regex 第 1 段のみ"
@@ -88,7 +88,7 @@ def load_pipeline(path: str, run_llm: bool) -> tuple[pd.DataFrame, str]:
     """CSV を読み込み、regex 第 1 段 → (任意) LLM 第 2 段の順で分類して返す。
 
     返り値: (df, status_message)。status は UI 表示用の状態説明。
-    Ollama 未起動の場合は run_llm=True でも regex のみに自動降格する。
+    oMLX 未起動/利用不可の場合は run_llm=True でも regex のみに自動降格する。
     入力 CSV の mtime/size をキャッシュキーに含むため、ファイルを差し替えると
     自動で再読込される。
     """

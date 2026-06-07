@@ -1,6 +1,6 @@
 """src/classify_llm.py の回帰テスト。
 
-Ollama は呼ばず、`FakeClient` で LLM レスポンスを差し替える。
+oMLX は呼ばず、`FakeClient` で LLM レスポンスを差し替える。
 """
 
 from __future__ import annotations
@@ -115,6 +115,24 @@ def test_parse_response_takes_last_match():
         "最終的には\nCATEGORIES: [malignant_tumor]"
     )
     assert _parse_response(text, VALID_IDS) == ["malignant_tumor"]
+
+
+def test_parse_response_no_brackets_single():
+    # oMLX 版 Swallow が角括弧を落として返すケース
+    assert _parse_response("CATEGORIES: malignant_tumor", VALID_IDS) == [
+        "malignant_tumor"
+    ]
+
+
+def test_parse_response_no_brackets_comma_list():
+    assert _parse_response(
+        "CATEGORIES: malignant_tumor, robot_assisted_davinci", VALID_IDS
+    ) == ["malignant_tumor", "robot_assisted_davinci"]
+
+
+def test_parse_response_no_brackets_none_text_is_empty_list():
+    # 角括弧なしで該当 ID 無し → パース不能(None)ではなく「該当なし([])」扱い
+    assert _parse_response("CATEGORIES: 該当なし", VALID_IDS) == []
 
 
 # --- _build_prompt -------------------------------------------------------

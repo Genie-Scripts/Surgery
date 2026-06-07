@@ -1,9 +1,10 @@
-# Ollama / OpenAI 互換 API 接続設定
-# Outpatient-Dashboard と同じパターン。
-# Phase A.0 実績: hf.co/mmnga/Llama-3.1-Swallow-8B-Instruct-v0.5-gguf:Q6_K で 100% 採用率・3.4s/件
+# oMLX (OpenAI 互換 API) 接続設定
+# Outpatient-Dashboard と同じパターン。要約/分類 LLM は oMLX に一本化。
+# 認証は OMLX_API_KEY env or ~/.omlx/settings.json の auth.api_key を Bearer で送る（llm_client が解決）。
+# モデルは oMLX 配信 id と完全一致が必須（旧 Ollama の hf.co/...:Q6_K タグ名は 404 になる）。
 
-endpoint: "http://localhost:11434/v1/chat/completions"
-model: "hf.co/mmnga/Llama-3.1-Swallow-8B-Instruct-v0.5-gguf:Q6_K"
+endpoint: "http://localhost:8000/v1/chat/completions"
+model: "Llama-3.1-Swallow-8B-Instruct-v0.5"
 
 # カテゴリ多ラベル分類用デフォルトパラメータ
 # 単純多ラベル分類なので低温度で安定出力を狙う
@@ -11,7 +12,7 @@ temperature: 0.1
 max_tokens: 200
 timeout: 60
 
-# Ollama API には system prompt は送るが、Llama 3.1 系は system 軽視傾向のため
+# oMLX(OpenAI互換) には system prompt を送るが、Llama 3.1 系は system 軽視傾向のため
 # 最小限とし、出力規約は user prompt 側で繰り返す
 system_prompt: |
   あなたは外科手術データのカテゴリ分類アシスタントです。

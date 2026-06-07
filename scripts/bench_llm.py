@@ -1,9 +1,9 @@
 """ローカル LLM 第 2 段（カテゴリ判定）のモデル横並びベンチマーク。
 
 目的:
-  Ollama 更新後に、現行 Swallow-8B と他モデル（MedGemma 等）を同一プロンプトで
-  比較し、置き替え判断の材料を出す。本番ロジック（src/classify_llm._build_prompt /
-  _parse_response）をそのまま流用するので、prompt 改修にも追従する。
+  oMLX の配信モデル更新後に、現行 Swallow-8B と他モデル（Qwen3.6-27B 等）を同一
+  プロンプトで比較し、置き替え判断の材料を出す。本番ロジック（src/classify_llm.
+  _build_prompt / _parse_response）をそのまま流用するので、prompt 改修にも追従する。
 
 評価軸:
   1. 正答（gold）: 人手ラベル付きケースに対する exact-match 正答率（raw LLM 判定）
@@ -36,13 +36,13 @@ from src.llm_client import LLMClient
 ROOT = Path(__file__).resolve().parent.parent
 LLM_CONFIG = ROOT / "config" / "llm_config.yaml"
 
-# 現行本番モデル（= 既定 baseline）
-CURRENT_MODEL = "hf.co/mmnga/Llama-3.1-Swallow-8B-Instruct-v0.5-gguf:Q6_K"
+# 現行本番モデル（= 既定 baseline）。oMLX 配信 id（/v1/models と完全一致）。
+CURRENT_MODEL = "Llama-3.1-Swallow-8B-Instruct-v0.5"
 
-# 既定の比較対象（Ollama 更新で入った候補を含む）
+# 既定の比較対象（oMLX 配信中の候補。--models で上書き可）
 DEFAULT_MODELS = [
     CURRENT_MODEL,
-    "MedAIBase/MedGemma1.5:4b",
+    "Qwen3.6-27B-UD-MLX-4bit",
 ]
 
 # 人手ラベル付き gold ケース。値は「raw LLM がこう答えるべき」期待 ID 集合。
@@ -169,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
 
     client = LLMClient(LLM_CONFIG)
     if not client.is_available():
-        print("Ollama が利用できません（サーバ未起動 / モデル未取得）", file=sys.stderr)
+        print("oMLX が利用できません（サーバ未起動 / モデル未配信）", file=sys.stderr)
         return 1
     if args.timeout is not None:
         client.config.timeout = args.timeout
