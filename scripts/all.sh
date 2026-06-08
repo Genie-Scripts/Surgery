@@ -24,14 +24,32 @@ RAW_DIR="data/raw"
 TODAY="$(date +%Y%m%d)"
 OUT_DIR="local/reports/${TODAY}"
 
-# venv の python を優先
-if [ -x ".venv/bin/python" ]; then
-    PYTHON=".venv/bin/python"
+# venv の python を優先。
+# .venv が存在するなら必ずそれを使う。dangling symlink 等で壊れている場合に
+# system python3（pandas 未導入）へ無言フォールバックすると
+# 「ModuleNotFoundError: No module named 'pandas'」という紛らわしいエラーに
+# なるため、その場合は再作成を促してエラー終了する。
+if [ -d ".venv" ]; then
+    if [ -x ".venv/bin/python" ] && .venv/bin/python -c '' >/dev/null 2>&1; then
+        PYTHON=".venv/bin/python"
+    else
+        echo "[all.sh] ERROR: .venv が壊れています（.venv/bin/python を実行できません）。" >&2
+        echo "[all.sh]   再作成: rm -rf .venv && uv venv --python 3.11 && uv pip install -e ." >&2
+        exit 1
+    fi
 elif command -v python3 >/dev/null 2>&1; then
     PYTHON="python3"
 else
     echo "[all.sh] ERROR: python が見つかりません" >&2
     exit 1
+fi
+
+# weasyprint(PDF 生成) は pango/cairo/gobject 等のネイティブ lib を dlopen する。
+# uv 管理 python など Homebrew 外の python では dyld が ${BREW_PREFIX}/lib を
+# 探索せず「cannot load library 'libgobject-2.0-0'」で落ちるため、明示的に通す。
+BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
+if [ -d "${BREW_PREFIX}/lib" ]; then
+    export DYLD_FALLBACK_LIBRARY_PATH="${BREW_PREFIX}/lib${DYLD_FALLBACK_LIBRARY_PATH:+:${DYLD_FALLBACK_LIBRARY_PATH}}"
 fi
 
 SKIP_CLASSIFY=0

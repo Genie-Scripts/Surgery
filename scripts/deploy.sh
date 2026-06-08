@@ -13,11 +13,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT}"
 
-# venv の python を優先（worktree から実行する場合は親リポジトリの venv も探す）
-if [ -x ".venv/bin/python" ]; then
-    PYTHON=".venv/bin/python"
-elif [ -x "../../../.venv/bin/python" ]; then
-    PYTHON="$(cd ../../.. && pwd)/.venv/bin/python"
+# venv の python を優先（worktree から実行する場合は親リポジトリの venv も探す）。
+# .venv が存在するなら必ずそれを使う。dangling symlink 等で壊れている場合に
+# system python3（pandas 未導入）へ無言フォールバックすると
+# 「ModuleNotFoundError: No module named 'pandas'」という紛らわしいエラーに
+# なるため、その場合は再作成を促してエラー終了する。
+_py_works() { [ -x "$1" ] && "$1" -c '' >/dev/null 2>&1; }
+
+PARENT_VENV="$(cd ../../.. 2>/dev/null && pwd)/.venv/bin/python"
+if [ -d ".venv" ]; then
+    if _py_works ".venv/bin/python"; then
+        PYTHON=".venv/bin/python"
+    else
+        echo "[deploy.sh] ERROR: .venv が壊れています（.venv/bin/python を実行できません）。" >&2
+        echo "[deploy.sh]   再作成: rm -rf .venv && uv venv --python 3.11 && uv pip install -e ." >&2
+        exit 1
+    fi
+elif _py_works "${PARENT_VENV}"; then
+    PYTHON="${PARENT_VENV}"
 elif command -v python3 >/dev/null 2>&1; then
     PYTHON="python3"
 else
