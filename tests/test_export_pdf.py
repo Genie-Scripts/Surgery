@@ -17,7 +17,9 @@ pytest.importorskip("kaleido")
 
 from src.aggregate import report_periods
 from src.export_pdf import (
+    HOSPITAL_LABEL,
     MIN_CASE_COUNT,
+    _hospital_weekly_target,
     export_all,
     load_dept_targets,
     render_dept_html,
@@ -128,6 +130,98 @@ def test_export_all_skips_low_volume(tmp_path: Path):
     names = [p.name for p in written]
     assert "整形外科.pdf" in names
     assert "内科.pdf" not in names  # 2 件 < 30 で skip
+
+
+def test_export_all_includes_hospital_by_default(tmp_path: Path):
+    """デフォルトで病院全体レポートを全科に加えて出力する。"""
+    df = pd.concat(
+        [
+            _make_df(dept="整形外科", n=50),
+            _make_df(dept="泌尿器科", n=40),
+        ],
+        ignore_index=True,
+    )
+    parquet = tmp_path / "data.parquet"
+    df.to_parquet(parquet)
+    targets = tmp_path / "targets.yaml"
+    targets.write_text(
+        "整形外科:\n  weekly_general_anesthesia: 5\n"
+        "泌尿器科:\n  weekly_general_anesthesia: 3\n",
+        encoding="utf-8",
+    )
+
+    out_dir = tmp_path / "out"
+    written = export_all(parquet, out_dir, targets, today=date(2026, 5, 27))
+    names = [p.name for p in written]
+    assert f"{HOSPITAL_LABEL}.pdf" in names
+    assert "整形外科.pdf" in names
+    assert "泌尿器科.pdf" in names
+    # 病院全体は先頭に生成・列挙される
+    assert names[0] == f"{HOSPITAL_LABEL}.pdf"
+
+
+def test_export_all_no_hospital_excludes_hospital(tmp_path: Path):
+    """include_hospital=False で病院全体を出力しない。"""
+    df = _make_df(dept="整形外科", n=50)
+    parquet = tmp_path / "data.parquet"
+    df.to_parquet(parquet)
+    targets = tmp_path / "targets.yaml"
+    targets.write_text("整形外科:\n  weekly_general_anesthesia: 5\n", encoding="utf-8")
+
+    out_dir = tmp_path / "out"
+    written = export_all(
+        parquet, out_dir, targets, today=date(2026, 5, 27), include_hospital=False
+    )
+    names = [p.name for p in written]
+    assert f"{HOSPITAL_LABEL}.pdf" not in names
+    assert "整形外科.pdf" in names
+
+
+def test_export_all_only_hospital(tmp_path: Path):
+    """--dept 病院全体 で病院全体レポートのみ出力する。"""
+    df = pd.concat(
+        [_make_df(dept="整形外科", n=50), _make_df(dept="泌尿器科", n=40)],
+        ignore_index=True,
+    )
+    parquet = tmp_path / "data.parquet"
+    df.to_parquet(parquet)
+    targets = tmp_path / "targets.yaml"
+    targets.write_text("整形外科:\n  weekly_general_anesthesia: 5\n", encoding="utf-8")
+
+    out_dir = tmp_path / "out"
+    written = export_all(
+        parquet, out_dir, targets, today=date(2026, 5, 27), only_dept=HOSPITAL_LABEL
+    )
+    names = [p.name for p in written]
+    assert names == [f"{HOSPITAL_LABEL}.pdf"]
+
+
+def test_hospital_weekly_target_rounds_float_sum(tmp_path: Path):
+    """病院全体の週次目標は各診療科目標（小数）の合計を四捨五入した整数。"""
+    targets_path = tmp_path / "targets.yaml"
+    targets_path.write_text(
+        "整形外科:\n  weekly_general_anesthesia: 28.8\n"
+        "泌尿器科:\n  weekly_general_anesthesia: 11.1\n",
+        encoding="utf-8",
+    )
+    targets = load_dept_targets(targets_path)
+    # 28.8 + 11.1 = 39.9 → 四捨五入で 40（個別科の切り捨て 28+11=39 ではない）
+    assert _hospital_weekly_target(targets) == 40
+    # 目標が 1 件もなければ None
+    assert _hospital_weekly_target({}) is None
+
+
+def test_hospital_weekly_target_round_half_up(tmp_path: Path):
+    """ちょうど .5 は切り上げる（ROUND_HALF_UP、銀行丸めではない）。"""
+    targets_path = tmp_path / "targets.yaml"
+    targets_path.write_text(
+        "A:\n  weekly_general_anesthesia: 2.0\n"
+        "B:\n  weekly_general_anesthesia: 2.5\n",
+        encoding="utf-8",
+    )
+    targets = load_dept_targets(targets_path)
+    # 2.0 + 2.5 = 4.5 → 5（銀行丸めなら 4 になるが ROUND_HALF_UP で 5）
+    assert _hospital_weekly_target(targets) == 5
 
 
 def test_load_dept_targets_missing_file_returns_empty(tmp_path: Path):

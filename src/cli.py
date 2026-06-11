@@ -5,14 +5,14 @@
   classify     匿名化済み CSV を読み込み、regex + LLM 第 2 段で分類して parquet 保存
   summary      classify 結果のカテゴリ別件数を表示
   export-html  公開用静的 HTML ダッシュボードを書き出す（spec §8.2）
-  export-pdf   診療科別 PDF レポートを local/reports/ に書き出す（実名版）
+  export-pdf   診療科別 + 病院全体 PDF レポートを local/reports/ に書き出す（実名版）
 
 実行:
   python -m src.cli anonymize [--dry-run]
   python -m src.cli classify  [--csv PATH] [--no-llm]
   python -m src.cli summary   [--parquet PATH]
   python -m src.cli export-html [--parquet PATH] [--output PATH]
-  python -m src.cli export-pdf  [--parquet PATH] [--output-dir DIR] [--dept NAME]
+  python -m src.cli export-pdf  [--parquet PATH] [--output-dir DIR] [--dept NAME] [--no-hospital]
 """
 
 from __future__ import annotations
@@ -206,6 +206,7 @@ def _cmd_export_pdf(args: argparse.Namespace) -> int:
         today=today,
         only_dept=args.dept,
         min_cases=args.min_cases,
+        include_hospital=not args.no_hospital,
     )
 
     print()
@@ -268,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_pdf = sub.add_parser(
         "export-pdf",
-        help="診療科別 PDF レポートを local/reports/YYYYMMDD/ に書き出す（実名版）",
+        help="診療科別 + 病院全体 PDF レポートを local/reports/YYYYMMDD/ に書き出す（実名版）",
     )
     p_pdf.add_argument(
         "--parquet", default=str(DEFAULT_OUTPUT_PARQUET), help="入力 parquet（classify の出力）"
@@ -284,7 +285,14 @@ def main(argv: list[str] | None = None) -> int:
         help=f"目標値 YAML (default: {DEFAULT_DEPT_TARGETS})",
     )
     p_pdf.add_argument(
-        "--dept", default=None, help="特定診療科のみ出力（未指定で全科 loop）"
+        "--dept",
+        default=None,
+        help="特定診療科のみ出力（未指定で全科 loop。'病院全体' で病院全体レポートのみ）",
+    )
+    p_pdf.add_argument(
+        "--no-hospital",
+        action="store_true",
+        help="病院全体レポートを出力しない（デフォルトは全科 + 病院全体）",
     )
     p_pdf.add_argument(
         "--min-cases", type=int, default=30, help="この件数未満の診療科はスキップ (default: 30)"

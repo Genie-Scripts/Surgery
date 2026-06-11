@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# 実名版データから診療科別 PDF を全科一括で生成する。
+# 実名版データから診療科別 + 病院全体 PDF を一括で生成する。
 #
 # フロー:
 #   data/raw/*.csv (実名) → classify → data/aggregated/classified_realname.parquet
 #   → export-pdf → local/reports/YYYYMMDD/{診療科}.pdf
+#                + local/reports/YYYYMMDD/病院全体.pdf
 #
 # 出力は local/ 配下（.gitignore 対象）。件数 < 30 の診療科は自動 skip。
+# 病院全体（全科合算）は閾値に関係なく必ず出力する（--no-hospital で抑止）。
 #
 # 注意:
 #   - 実名 parquet (data/aggregated/classified_realname.parquet) は .gitignore
@@ -56,22 +58,25 @@ SKIP_CLASSIFY=0
 NO_LLM=0
 ONLY_DEPT=""
 MIN_CASES=30
+NO_HOSPITAL=0
 
 usage() {
     cat <<'EOF'
 使い方: scripts/all.sh [OPTIONS]
 
-実名版データから診療科別 PDF を全科一括で生成する。
+実名版データから診療科別 + 病院全体 PDF を一括で生成する。
 
 OPTIONS:
   --skip-classify       classify をスキップ（既存 classified_realname.parquet を流用）
   --no-llm              LLM 第 2 段をスキップ（regex 第 1 段のみで分類）
-  --dept NAME           特定診療科のみ出力
+  --dept NAME           特定診療科のみ出力（'病院全体' で病院全体レポートのみ）
+  --no-hospital         病院全体レポートを出力しない（デフォルトは全科 + 病院全体）
   --min-cases N         この件数未満の診療科はスキップ (default: 30)
   -h, --help            このヘルプを表示
 
 出力:
   local/reports/YYYYMMDD/{診療科}.pdf
+  local/reports/YYYYMMDD/病院全体.pdf
 EOF
 }
 
@@ -80,6 +85,7 @@ while [ $# -gt 0 ]; do
         --skip-classify)  SKIP_CLASSIFY=1; shift ;;
         --no-llm)         NO_LLM=1; shift ;;
         --dept)           ONLY_DEPT="$2"; shift 2 ;;
+        --no-hospital)    NO_HOSPITAL=1; shift ;;
         --min-cases)      MIN_CASES="$2"; shift 2 ;;
         -h|--help)        usage; exit 0 ;;
         *)
@@ -126,6 +132,9 @@ step "STEP 2/2: export-pdf → ${OUT_DIR}"
 pdf_args=(--parquet "${PARQUET}" --output-dir "${OUT_DIR}" --min-cases "${MIN_CASES}")
 if [ -n "${ONLY_DEPT}" ]; then
     pdf_args+=(--dept "${ONLY_DEPT}")
+fi
+if [ "$NO_HOSPITAL" = "1" ]; then
+    pdf_args+=(--no-hospital)
 fi
 "$PYTHON" -m src.cli export-pdf "${pdf_args[@]}"
 

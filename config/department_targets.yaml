@@ -8,48 +8,48 @@
 #     weekly_general_anesthesia: <int>   # 週あたり目標件数
 #     effective_from: YYYY-MM-DD         # 適用開始日（任意。複数期で目標が変わる将来用）
 #
-# 値は実値ではなくサンプル。運用前に各診療科と擦り合わせて確定すること。
+# 値は実値。運用前に各診療科と擦り合わせて確定すること。
 
 整形外科:
-  weekly_general_anesthesia: 10
+  weekly_general_anesthesia: 28.8
   effective_from: 2025-04-01
 
 一般消化器外科:
-  weekly_general_anesthesia: 12
+  weekly_general_anesthesia: 13.8
   effective_from: 2025-04-01
 
 産婦人科:
-  weekly_general_anesthesia: 8
+  weekly_general_anesthesia: 12.5
   effective_from: 2025-04-01
 
 泌尿器科:
-  weekly_general_anesthesia: 8
+  weekly_general_anesthesia: 11.1
   effective_from: 2025-04-01
 
 耳鼻咽喉科:
-  weekly_general_anesthesia: 6
+  weekly_general_anesthesia: 7.6
   effective_from: 2025-04-01
 
 形成外科:
-  weekly_general_anesthesia: 4
+  weekly_general_anesthesia: 2.8
   effective_from: 2025-04-01
 
 乳腺外科:
-  weekly_general_anesthesia: 5
+  weekly_general_anesthesia: 8.1
   effective_from: 2025-04-01
 
 脳神経外科:
-  weekly_general_anesthesia: 4
-  effective_from: 2025-04-01
-
-歯科口腔外科:
   weekly_general_anesthesia: 3
   effective_from: 2025-04-01
 
+歯科口腔外科:
+  weekly_general_anesthesia: 3.7
+  effective_from: 2025-04-01
+
 呼吸器外科:
-  weekly_general_anesthesia: 2
+  weekly_general_anesthesia: 2.8
   effective_from: 2025-04-01
 
 心臓血管外科:
-  weekly_general_anesthesia: 2
+  weekly_general_anesthesia: 2.1
   effective_from: 2025-04-01

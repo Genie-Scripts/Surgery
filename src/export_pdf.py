@@ -20,6 +20,7 @@ import base64
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -47,6 +48,10 @@ logger = logging.getLogger(__name__)
 # 件数閾値: これ未満の診療科は出力しない
 MIN_CASE_COUNT = 30
 
+# 病院全体レポートのラベル（PDF タイトル・ファイル名に使う）。
+# 実在の診療科名と衝突しない値にすること。
+HOSPITAL_LABEL = "病院全体"
+
 CATEGORY_LABELS: dict[str, str] = {
     "malignant_tumor": "悪性腫瘍",
     "artificial_joint": "人工関節",
@@ -72,9 +77,15 @@ COLOR_GRID = "#e9ecef"
 
 @dataclass(frozen=True)
 class DeptTarget:
-    """診療科の週あたり全身麻酔手術件数 目標。"""
+    """診療科の週あたり全身麻酔手術件数 目標。
+
+    `weekly_general_anesthesia` は表示・達成判定に使う整数（YAML 値を切り捨て）。
+    `weekly_general_anesthesia_raw` は YAML の元値（小数）で、病院全体の合算
+    （小数合計を四捨五入）に使う。
+    """
 
     weekly_general_anesthesia: int
+    weekly_general_anesthesia_raw: float
     effective_from: date | None
 
 
@@ -96,8 +107,10 @@ def load_dept_targets(path: Path) -> dict[str, DeptTarget]:
         eff = cfg.get("effective_from")
         if isinstance(eff, str):
             eff = date.fromisoformat(eff)
+        raw = float(cfg["weekly_general_anesthesia"])
         out[dept] = DeptTarget(
-            weekly_general_anesthesia=int(cfg["weekly_general_anesthesia"]),
+            weekly_general_anesthesia=int(raw),
+            weekly_general_anesthesia_raw=raw,
             effective_from=eff if isinstance(eff, date) else None,
         )
     return out
@@ -716,6 +729,21 @@ def _cases_in_report_window(df_dept: pd.DataFrame, periods: ReportPeriods) -> in
     return int((r12 | p12).sum())
 
 
+def _hospital_weekly_target(targets: dict[str, DeptTarget]) -> int | None:
+    """病院全体の週次全麻目標 = 各診療科の目標（小数）の合計を四捨五入した整数。
+
+    個別科表示は切り捨て整数だが、病院全体は元の小数を合算してから四捨五入する
+    （例: 28.8 + 11.1 = 39.9 → 40）。float 誤差を避けるため Decimal で計算し、
+    四捨五入は ROUND_HALF_UP（.5 は切り上げ）。
+    1 件も目標が設定されていなければ None（目標線・達成率なしで実績のみ描画）。
+    """
+    raws = [t.weekly_general_anesthesia_raw for t in targets.values()]
+    if not raws:
+        return None
+    total = sum((Decimal(str(v)) for v in raws), Decimal(0))
+    return int(total.to_integral_value(rounding=ROUND_HALF_UP))
+
+
 def export_all(
     parquet_path: Path,
     output_dir: Path,
@@ -723,12 +751,16 @@ def export_all(
     today: date | None = None,
     only_dept: str | None = None,
     min_cases: int = MIN_CASE_COUNT,
+    include_hospital: bool = True,
 ) -> list[Path]:
-    """全診療科の PDF を出力する。
+    """全診療科 + 病院全体の PDF を出力する。
 
-    - `only_dept`: 指定診療科のみ出力
+    - `only_dept`: 指定診療科のみ出力（"病院全体" を渡すと病院全体レポートのみ）
+    - `include_hospital`: True なら全科ループに加えて病院全体レポートも出力する。
+      `only_dept` 指定時は無視（その対象のみ出力）。
     - `today` None なら現在日時を使用
     - 対象期間（直近24ヶ月）の件数 < `min_cases` の診療科は skip
+      （病院全体は全科合算なので件数閾値の対象外）
     """
     import kaleido  # noqa: PLC0415
 
@@ -738,10 +770,30 @@ def export_all(
     periods = report_periods(today)
     targets = load_dept_targets(targets_path)
 
+    # 出力ジョブ (ラベル, 対象 df, 週次全麻目標) を組み立てる。
+    # 病院全体は実施診療科で絞らず df 全体を渡す。
+    jobs: list[tuple[str, pd.DataFrame, int | None]] = []
     if only_dept is not None:
-        depts = [only_dept]
+        if only_dept == HOSPITAL_LABEL:
+            jobs.append((HOSPITAL_LABEL, df, _hospital_weekly_target(targets)))
+        else:
+            t = targets.get(only_dept)
+            jobs.append((
+                only_dept,
+                df[df["実施診療科"] == only_dept],
+                t.weekly_general_anesthesia if t else None,
+            ))
     else:
-        depts = sorted(df["実施診療科"].dropna().unique().tolist())
+        # 病院全体を先頭に（生成順・一覧で最初に出す）
+        if include_hospital:
+            jobs.append((HOSPITAL_LABEL, df, _hospital_weekly_target(targets)))
+        for dept in sorted(df["実施診療科"].dropna().unique().tolist()):
+            t = targets.get(dept)
+            jobs.append((
+                dept,
+                df[df["実施診療科"] == dept],
+                t.weekly_general_anesthesia if t else None,
+            ))
 
     output_dir.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now()
@@ -749,27 +801,26 @@ def export_all(
 
     kaleido.start_sync_server(silence_warnings=True)
     try:
-        for dept in depts:
-            df_d = df[df["実施診療科"] == dept]
+        for label, df_d, target in jobs:
             n_window = _cases_in_report_window(df_d, periods)
-            if n_window < min_cases:
+            # 病院全体は全科合算で必ず閾値超え。診療科のみ件数で skip 判定する。
+            if label != HOSPITAL_LABEL and n_window < min_cases:
                 logger.info(
                     "skip: %s (対象期間件数 %d < %d / 全期間 %d)",
-                    dept, n_window, min_cases, len(df_d),
+                    label, n_window, min_cases, len(df_d),
                 )
                 continue
-            target = targets.get(dept)
-            out = output_dir / f"{dept}.pdf"
+            out = output_dir / f"{label}.pdf"
             try:
                 render_dept_pdf(
-                    df_d, dept, out, periods,
-                    target=target.weekly_general_anesthesia if target else None,
+                    df_d, label, out, periods,
+                    target=target,
                     generated_at=generated_at,
                 )
                 written.append(out)
                 logger.info("出力: %s (対象期間件数 %d)", out, n_window)
             except Exception:
-                logger.exception("PDF 生成失敗: %s", dept)
+                logger.exception("PDF 生成失敗: %s", label)
     finally:
         kaleido.stop_sync_server()
 
