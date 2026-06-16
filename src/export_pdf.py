@@ -2,6 +2,7 @@
 
 ローカル実名版で `data/aggregated/classified.parquet`（実名 parquet）を入力に、
 診療科ごとに 4 ページ A4 縦の PDF を `local/reports/YYYYMMDD/` 配下へ書き出す。
+ダヴィンチ機種別（SP/Xi）稼働率の節を末尾に追加（該当症例がある科・病院全体のみ）。
 
 設計（spec 詰めの結果）:
   - 集計は月締め: 集計終端 = 当日の前月末日
@@ -38,6 +39,10 @@ from src.aggregate import (
     monthly_count_compare,
     monthly_general_anesthesia_compare,
     report_periods,
+    robot_dept_share_monthly,
+    robot_monthly_usage_rate,
+    robot_usage_days,
+    robot_weekday_usage_rate,
     top_n_postop_diagnoses,
     top_n_procedures,
     weekly_general_anesthesia,
@@ -47,6 +52,9 @@ logger = logging.getLogger(__name__)
 
 # 件数閾値: これ未満の診療科は出力しない
 MIN_CASE_COUNT = 30
+
+# 手術室→ダヴィンチ機種マップの既定パス（無ければロボット節はスキップ）
+ROBOT_ROOMS_DEFAULT_PATH = Path(__file__).resolve().parent.parent / "config" / "robot_rooms.yaml"
 
 # 病院全体レポートのラベル（PDF タイトル・ファイル名に使う）。
 # 実在の診療科名と衝突しない値にすること。
@@ -68,6 +76,21 @@ COLOR_MUTED = "#6c757d"
 COLOR_OK = "#198754"
 COLOR_NG = "#dc3545"
 COLOR_GRID = "#e9ecef"
+
+# ダヴィンチ機種色（config の機種ラベルでキー）+ 診療科積み上げ用カテゴリ配色
+COLOR_SP = "#0d6efd"  # ダヴィンチSP（青）
+COLOR_XI = "#e8590c"  # ダヴィンチXi（橙）
+ROBOT_MACHINE_COLORS: dict[str, str] = {"ダヴィンチSP": COLOR_SP, "ダヴィンチXi": COLOR_XI}
+DEPT_PALETTE = (
+    "#0d6efd",
+    "#20c997",
+    "#fd7e14",
+    "#6f42c1",
+    "#198754",
+    "#d63384",
+    "#0dcaf0",
+    "#ffc107",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +139,18 @@ def load_dept_targets(path: Path) -> dict[str, DeptTarget]:
     return out
 
 
+def load_robot_rooms(path: Path) -> dict[str, str]:
+    """`config/robot_rooms.yaml` を読み込んで {手術室: 機種ラベル} を返す。
+
+    ファイルが無い／空なら空 dict（ロボット節はスキップされる）。
+    """
+    if not path.exists():
+        logger.warning("robot_rooms ファイルが見つかりません: %s（ロボット節をスキップ）", path)
+        return {}
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return {str(room): str(machine) for room, machine in raw.items()}
+
+
 # ---------------------------------------------------------------------------
 # Plotly チャート（PNG 出力）
 # ---------------------------------------------------------------------------
@@ -129,13 +164,20 @@ def _common_layout(fig: go.Figure, title: str | None, height: int = 280) -> go.F
         plot_bgcolor="#fff",
         paper_bgcolor="#fff",
         font={"family": "Hiragino Sans, Yu Gothic, sans-serif", "size": 11, "color": COLOR_TEXT},
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0,
-                "font": {"size": 10}},
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "left",
+            "x": 0,
+            "font": {"size": 10},
+        },
         showlegend=True,
     )
     fig.update_xaxes(showgrid=False, linecolor=COLOR_GRID, tickfont={"size": 10})
-    fig.update_yaxes(gridcolor=COLOR_GRID, linecolor=COLOR_GRID, tickfont={"size": 10},
-                     rangemode="tozero")
+    fig.update_yaxes(
+        gridcolor=COLOR_GRID, linecolor=COLOR_GRID, tickfont={"size": 10}, rangemode="tozero"
+    )
     return fig
 
 
@@ -151,16 +193,22 @@ def _fig_monthly_count_rolling(df_dept: pd.DataFrame, periods: ReportPeriods) ->
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
-            x=mt["月ラベル"], y=mt["直近"], mode="lines+markers",
+            x=mt["月ラベル"],
+            y=mt["直近"],
+            mode="lines+markers",
             name="直近12ヶ月",
-            line={"color": COLOR_PRIMARY, "width": 2.5}, marker={"size": 7},
+            line={"color": COLOR_PRIMARY, "width": 2.5},
+            marker={"size": 7},
         )
     )
     fig.add_trace(
         go.Scatter(
-            x=mt["月ラベル"], y=mt["前期"], mode="lines+markers",
+            x=mt["月ラベル"],
+            y=mt["前期"],
+            mode="lines+markers",
             name="その前12ヶ月",
-            line={"color": COLOR_COMPARE, "width": 2, "dash": "dot"}, marker={"size": 6},
+            line={"color": COLOR_COMPARE, "width": 2, "dash": "dot"},
+            marker={"size": 6},
         )
     )
     return _common_layout(fig, title="月次 件数（直近12ヶ月 vs その前12ヶ月）")
@@ -170,16 +218,26 @@ def _fig_monthly_avg_time_rolling(df_dept: pd.DataFrame, periods: ReportPeriods)
     mt = monthly_avg_time_compare(df_dept, periods.recent_12mo, periods.prior_12mo)
     fig = go.Figure()
     fig.add_trace(
-        go.Scatter(x=mt["月ラベル"], y=mt["直近"], mode="lines+markers",
-                   name="直近12ヶ月",
-                   line={"color": COLOR_PRIMARY, "width": 2.5}, marker={"size": 7},
-                   connectgaps=False)
+        go.Scatter(
+            x=mt["月ラベル"],
+            y=mt["直近"],
+            mode="lines+markers",
+            name="直近12ヶ月",
+            line={"color": COLOR_PRIMARY, "width": 2.5},
+            marker={"size": 7},
+            connectgaps=False,
+        )
     )
     fig.add_trace(
-        go.Scatter(x=mt["月ラベル"], y=mt["前期"], mode="lines+markers",
-                   name="その前12ヶ月",
-                   line={"color": COLOR_COMPARE, "width": 2, "dash": "dot"}, marker={"size": 6},
-                   connectgaps=False)
+        go.Scatter(
+            x=mt["月ラベル"],
+            y=mt["前期"],
+            mode="lines+markers",
+            name="その前12ヶ月",
+            line={"color": COLOR_COMPARE, "width": 2, "dash": "dot"},
+            marker={"size": 6},
+            connectgaps=False,
+        )
     )
     return _common_layout(fig, title="月次 平均手術時間 (分)")
 
@@ -190,8 +248,15 @@ def _fig_weekly_ga_vs_target(
     wk = weekly_general_anesthesia(df_dept, periods.weekly_12w, target=target)
     if wk.empty:
         fig = go.Figure()
-        fig.add_annotation(text="直近12週データなし", xref="paper", yref="paper",
-                           x=0.5, y=0.5, showarrow=False, font={"size": 13, "color": COLOR_MUTED})
+        fig.add_annotation(
+            text="直近12週データなし",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font={"size": 13, "color": COLOR_MUTED},
+        )
         fig.update_layout(xaxis={"visible": False}, yaxis={"visible": False}, height=240)
         return fig
 
@@ -202,18 +267,29 @@ def _fig_weekly_ga_vs_target(
 
     fig = go.Figure()
     fig.add_trace(
-        go.Bar(x=wk["週ラベル"], y=wk["全麻件数"], marker_color=bar_colors,
-               text=wk["全麻件数"], textposition="outside",
-               name="実績")
+        go.Bar(
+            x=wk["週ラベル"],
+            y=wk["全麻件数"],
+            marker_color=bar_colors,
+            text=wk["全麻件数"],
+            textposition="outside",
+            name="実績",
+        )
     )
     if target is not None:
-        fig.add_hline(y=target, line={"color": COLOR_NG, "width": 2, "dash": "dash"},
-                      annotation_text=f"目標 {target} 件/週",
-                      annotation_position="top right",
-                      annotation_font={"color": COLOR_NG, "size": 10})
+        fig.add_hline(
+            y=target,
+            line={"color": COLOR_NG, "width": 2, "dash": "dash"},
+            annotation_text=f"目標 {target} 件/週",
+            annotation_position="top right",
+            annotation_font={"color": COLOR_NG, "size": 10},
+        )
 
-    title = "週次 全麻手術件数 vs 目標（直近12週）" if target is not None \
+    title = (
+        "週次 全麻手術件数 vs 目標（直近12週）"
+        if target is not None
         else "週次 全麻手術件数（直近12週・目標未設定）"
+    )
     fig = _common_layout(fig, title=title, height=300)
     fig.update_layout(showlegend=False)
     return fig
@@ -223,14 +299,24 @@ def _fig_monthly_ga_rolling(df_dept: pd.DataFrame, periods: ReportPeriods) -> go
     mt = monthly_general_anesthesia_compare(df_dept, periods.recent_12mo, periods.prior_12mo)
     fig = go.Figure()
     fig.add_trace(
-        go.Scatter(x=mt["月ラベル"], y=mt["直近"],
-                   mode="lines+markers", name="直近12ヶ月",
-                   line={"color": COLOR_PRIMARY, "width": 2.5}, marker={"size": 7})
+        go.Scatter(
+            x=mt["月ラベル"],
+            y=mt["直近"],
+            mode="lines+markers",
+            name="直近12ヶ月",
+            line={"color": COLOR_PRIMARY, "width": 2.5},
+            marker={"size": 7},
+        )
     )
     fig.add_trace(
-        go.Scatter(x=mt["月ラベル"], y=mt["前期"],
-                   mode="lines+markers", name="その前12ヶ月",
-                   line={"color": COLOR_COMPARE, "width": 2, "dash": "dot"}, marker={"size": 6})
+        go.Scatter(
+            x=mt["月ラベル"],
+            y=mt["前期"],
+            mode="lines+markers",
+            name="その前12ヶ月",
+            line={"color": COLOR_COMPARE, "width": 2, "dash": "dot"},
+            marker={"size": 6},
+        )
     )
     return _common_layout(fig, title="月次 全麻手術件数（直近12ヶ月 vs その前12ヶ月）")
 
@@ -243,10 +329,26 @@ def _fig_category_bar_3mo(df_dept: pd.DataFrame, periods: ReportPeriods) -> go.F
     prior_vals = cc["比較件数"].tolist() if not cc.empty else []
 
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=labels, y=prior_vals, name="その前3ヶ月",
-                         marker_color=COLOR_COMPARE, text=prior_vals, textposition="outside"))
-    fig.add_trace(go.Bar(x=labels, y=recent_vals, name="直近3ヶ月",
-                         marker_color=COLOR_PRIMARY, text=recent_vals, textposition="outside"))
+    fig.add_trace(
+        go.Bar(
+            x=labels,
+            y=prior_vals,
+            name="その前3ヶ月",
+            marker_color=COLOR_COMPARE,
+            text=prior_vals,
+            textposition="outside",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=labels,
+            y=recent_vals,
+            name="直近3ヶ月",
+            marker_color=COLOR_PRIMARY,
+            text=recent_vals,
+            textposition="outside",
+        )
+    )
     fig.update_layout(barmode="group")
     return _common_layout(fig, title="カテゴリ別 件数（直近3ヶ月 vs その前3ヶ月）")
 
@@ -257,40 +359,213 @@ def _fig_category_monthly_rolling(df_dept: pd.DataFrame, periods: ReportPeriods)
 
     cats = [c for c in CATEGORY_COLUMNS if c in df_dept.columns]
     fig = make_subplots(
-        rows=2, cols=2,
+        rows=2,
+        cols=2,
         subplot_titles=[CATEGORY_LABELS.get(c, c) for c in cats[:4]],
-        vertical_spacing=0.18, horizontal_spacing=0.10,
+        vertical_spacing=0.18,
+        horizontal_spacing=0.10,
     )
 
     for i, cat in enumerate(cats[:4]):
         row, col = i // 2 + 1, i % 2 + 1
         mt = monthly_category_compare(df_dept, periods.recent_12mo, periods.prior_12mo, cat)
         fig.add_trace(
-            go.Scatter(x=mt["月ラベル"], y=mt["直近"],
-                       mode="lines+markers", line={"color": COLOR_PRIMARY, "width": 2},
-                       marker={"size": 5}, showlegend=(i == 0), name="直近12ヶ月"),
-            row=row, col=col,
+            go.Scatter(
+                x=mt["月ラベル"],
+                y=mt["直近"],
+                mode="lines+markers",
+                line={"color": COLOR_PRIMARY, "width": 2},
+                marker={"size": 5},
+                showlegend=(i == 0),
+                name="直近12ヶ月",
+            ),
+            row=row,
+            col=col,
         )
         fig.add_trace(
-            go.Scatter(x=mt["月ラベル"], y=mt["前期"],
-                       mode="lines+markers",
-                       line={"color": COLOR_COMPARE, "width": 1.5, "dash": "dot"},
-                       marker={"size": 5}, showlegend=(i == 0), name="その前12ヶ月"),
-            row=row, col=col,
+            go.Scatter(
+                x=mt["月ラベル"],
+                y=mt["前期"],
+                mode="lines+markers",
+                line={"color": COLOR_COMPARE, "width": 1.5, "dash": "dot"},
+                marker={"size": 5},
+                showlegend=(i == 0),
+                name="その前12ヶ月",
+            ),
+            row=row,
+            col=col,
         )
 
     fig.update_annotations(font_size=11)
     fig.update_layout(
         height=440,
         margin={"l": 40, "r": 20, "t": 40, "b": 30},
-        paper_bgcolor="#fff", plot_bgcolor="#fff",
+        paper_bgcolor="#fff",
+        plot_bgcolor="#fff",
         font={"family": "Hiragino Sans, Yu Gothic, sans-serif", "size": 10, "color": COLOR_TEXT},
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.05, "xanchor": "left", "x": 0,
-                "font": {"size": 10}},
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.05,
+            "xanchor": "left",
+            "x": 0,
+            "font": {"size": 10},
+        },
     )
     fig.update_xaxes(showgrid=False, linecolor=COLOR_GRID, tickfont={"size": 9})
-    fig.update_yaxes(gridcolor=COLOR_GRID, linecolor=COLOR_GRID, tickfont={"size": 9},
-                     rangemode="tozero")
+    fig.update_yaxes(
+        gridcolor=COLOR_GRID, linecolor=COLOR_GRID, tickfont={"size": 9}, rangemode="tozero"
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Plotly チャート（ダヴィンチ機種別 稼働率）
+# ---------------------------------------------------------------------------
+
+
+def _rate_bar_labels(series: pd.Series) -> list[str]:
+    """棒ラベル: NaN(営業日0) は空文字、それ以外は整数%。"""
+    return ["" if pd.isna(v) else f"{v:.0f}%" for v in series]
+
+
+def _fig_robot_monthly_rate(
+    df_all: pd.DataFrame,
+    dept: str | None,
+    periods: ReportPeriods,
+    room_machine_map: dict[str, str],
+    machines: list[str],
+) -> go.Figure:
+    """月次 機種使用率（直近12ヶ月）。SP・Xi を 2 本線で重ねる。"""
+    fig = go.Figure()
+    for i, machine in enumerate(machines):
+        mt = robot_monthly_usage_rate(df_all, periods.recent_12mo, machine, room_machine_map, dept)
+        color = ROBOT_MACHINE_COLORS.get(machine, DEPT_PALETTE[i % len(DEPT_PALETTE)])
+        fig.add_trace(
+            go.Scatter(
+                x=mt["月ラベル"],
+                y=mt["使用率"],
+                mode="lines+markers",
+                name=machine,
+                line={"color": color, "width": 2.5},
+                marker={"size": 6},
+                connectgaps=False,
+            )
+        )
+    fig = _common_layout(fig, title="月次 ダヴィンチ使用率（営業日ベース・直近12ヶ月）")
+    fig.update_yaxes(ticksuffix="%", rangemode="tozero")
+    return fig
+
+
+def _fig_robot_weekday_rate(
+    df_all: pd.DataFrame,
+    dept: str | None,
+    periods: ReportPeriods,
+    room_machine_map: dict[str, str],
+    machine: str,
+) -> go.Figure:
+    """曜日別 機種使用率（直近6ヶ月 vs 前年同6ヶ月）のグループ棒。"""
+    recent = robot_weekday_usage_rate(df_all, periods.recent_6mo, machine, room_machine_map, dept)
+    yoy = robot_weekday_usage_rate(df_all, periods.yoy_6mo, machine, room_machine_map, dept)
+    color = ROBOT_MACHINE_COLORS.get(machine, COLOR_PRIMARY)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=yoy["曜日"],
+            y=yoy["使用率"],
+            name="前年同6ヶ月",
+            marker_color=COLOR_COMPARE,
+            text=_rate_bar_labels(yoy["使用率"]),
+            textposition="outside",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=recent["曜日"],
+            y=recent["使用率"],
+            name="直近6ヶ月",
+            marker_color=color,
+            text=_rate_bar_labels(recent["使用率"]),
+            textposition="outside",
+        )
+    )
+    fig.update_layout(barmode="group")
+    fig = _common_layout(fig, title=f"曜日別 {machine} 使用率（直近6ヶ月 vs 前年同6ヶ月）")
+    fig.update_yaxes(ticksuffix="%", rangemode="tozero")
+    return fig
+
+
+def _fig_robot_dept_share(
+    df_all: pd.DataFrame,
+    periods: ReportPeriods,
+    room_machine_map: dict[str, str],
+    machine: str,
+) -> go.Figure:
+    """月次 診療科別 機種症例数（実数の積み上げ）＋ 100% 積み上げ（構成比）。病院全体用。"""
+    from plotly.subplots import make_subplots  # noqa: PLC0415
+
+    pivot = robot_dept_share_monthly(df_all, periods.recent_12mo, machine, room_machine_map)
+    depts = list(pivot.columns)
+    months = list(pivot.index)
+
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=(f"{machine} 症例数（実数）", f"{machine} 診療科構成比"),
+        horizontal_spacing=0.10,
+    )
+    for i, d in enumerate(depts):
+        fig.add_trace(
+            go.Bar(
+                x=months,
+                y=pivot[d].tolist(),
+                name=d,
+                marker_color=DEPT_PALETTE[i % len(DEPT_PALETTE)],
+                legendgroup=d,
+                showlegend=True,
+            ),
+            row=1,
+            col=1,
+        )
+    totals = pivot.sum(axis=1)
+    pct = pivot.div(totals.replace(0, pd.NA), axis=0) * 100
+    for i, d in enumerate(depts):
+        fig.add_trace(
+            go.Bar(
+                x=months,
+                y=pct[d].fillna(0).tolist(),
+                name=d,
+                marker_color=DEPT_PALETTE[i % len(DEPT_PALETTE)],
+                legendgroup=d,
+                showlegend=False,
+            ),
+            row=1,
+            col=2,
+        )
+
+    fig.update_layout(
+        barmode="stack",
+        height=320,
+        margin={"l": 40, "r": 20, "t": 52, "b": 64},
+        paper_bgcolor="#fff",
+        plot_bgcolor="#fff",
+        font={"family": "Hiragino Sans, Yu Gothic, sans-serif", "size": 10, "color": COLOR_TEXT},
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.10,
+            "xanchor": "left",
+            "x": 0,
+            "font": {"size": 9},
+        },
+    )
+    fig.update_annotations(font_size=11)
+    fig.update_xaxes(showgrid=False, linecolor=COLOR_GRID, tickfont={"size": 9}, tickangle=-45)
+    fig.update_yaxes(
+        gridcolor=COLOR_GRID, linecolor=COLOR_GRID, tickfont={"size": 9}, rangemode="tozero"
+    )
+    fig.update_yaxes(ticksuffix="%", col=2)
     return fig
 
 
@@ -327,8 +602,9 @@ def _diff_span(diff: float | int, fmt: str = "int", unit: str = "") -> str:
     return f'<span class="{cls}">{body}{unit}</span>'
 
 
-def _kpi_card(label: str, comp_label: str, recent_label: str,
-              comp: str, recent: str, diff_html: str) -> str:
+def _kpi_card(
+    label: str, comp_label: str, recent_label: str, comp: str, recent: str, diff_html: str
+) -> str:
     return f"""
     <div class="kpi-card">
       <div class="kpi-label">{label}</div>
@@ -349,20 +625,38 @@ def _build_kpi_cards(kpi: dict) -> str:
     comp_label = "昨年同3ヶ月"
     recent_label = "直近3ヶ月"
     return (
-        _kpi_card("件数", comp_label, recent_label,
-                  _fmt_int(comp["件数"]), _fmt_int(recent["件数"]),
-                  _diff_span(diff["件数"], "int"))
-        + _kpi_card("平均手術時間 (分)", comp_label, recent_label,
-                    _fmt_float(comp["平均手術時間_分"]),
-                    _fmt_float(recent["平均手術時間_分"]),
-                    _diff_span(diff["平均手術時間_分"], "minute"))
-        + _kpi_card("緊急比率", comp_label, recent_label,
-                    _fmt_pct(comp["緊急比率"]), _fmt_pct(recent["緊急比率"]),
-                    _diff_span(diff["緊急比率"], "pct_point"))
-        + _kpi_card("全麻手術件数", comp_label, recent_label,
-                    _fmt_int(comp["全麻手術件数"]),
-                    _fmt_int(recent["全麻手術件数"]),
-                    _diff_span(diff["全麻手術件数"], "int"))
+        _kpi_card(
+            "件数",
+            comp_label,
+            recent_label,
+            _fmt_int(comp["件数"]),
+            _fmt_int(recent["件数"]),
+            _diff_span(diff["件数"], "int"),
+        )
+        + _kpi_card(
+            "平均手術時間 (分)",
+            comp_label,
+            recent_label,
+            _fmt_float(comp["平均手術時間_分"]),
+            _fmt_float(recent["平均手術時間_分"]),
+            _diff_span(diff["平均手術時間_分"], "minute"),
+        )
+        + _kpi_card(
+            "緊急比率",
+            comp_label,
+            recent_label,
+            _fmt_pct(comp["緊急比率"]),
+            _fmt_pct(recent["緊急比率"]),
+            _diff_span(diff["緊急比率"], "pct_point"),
+        )
+        + _kpi_card(
+            "全麻手術件数",
+            comp_label,
+            recent_label,
+            _fmt_int(comp["全麻手術件数"]),
+            _fmt_int(recent["全麻手術件数"]),
+            _diff_span(diff["全麻手術件数"], "int"),
+        )
     )
 
 
@@ -594,7 +888,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     <div>{table_diagnoses}</div>
   </div>
 </section>
-
+{robot_section}
 </body>
 </html>
 """
@@ -624,45 +918,157 @@ def _build_target_summary(
     )
 
 
+def _machines_used(
+    df_all: pd.DataFrame,
+    dept: str | None,
+    periods: ReportPeriods,
+    room_machine_map: dict[str, str],
+    machine_labels: list[str],
+) -> list[str]:
+    """gate 用: prior_12mo 開始〜cutoff の範囲で 1 日でも使われた機種ラベルを返す。"""
+    span = (periods.prior_12mo[0], periods.cutoff)
+    return [
+        m
+        for m in machine_labels
+        if len(robot_usage_days(df_all, span, m, room_machine_map, dept)) > 0
+    ]
+
+
+def _build_robot_section(
+    df_all: pd.DataFrame,
+    dept_label: str,
+    periods: ReportPeriods,
+    room_machine_map: dict[str, str],
+) -> str:
+    """ダヴィンチ稼働状況の節 HTML。該当症例が無ければ空文字（増ページなし）。
+
+    分母（営業日）は常に病院全体 `df_all`、分子は診療科で絞る。
+    病院全体: 使用率ページ + 診療科構成ページの 2 ページ。
+    診療科:   使用率ページのみ（その科が実際に使った機種だけ描画）。
+    """
+    if not room_machine_map:
+        return ""
+    dept = None if dept_label == HOSPITAL_LABEL else dept_label
+    machine_labels = list(dict.fromkeys(room_machine_map.values()))
+    used = _machines_used(df_all, dept, periods, room_machine_map, machine_labels)
+    if not used:
+        return ""
+
+    is_hospital = dept is None
+    scope_label = HOSPITAL_LABEL if is_hospital else dept_label
+    rooms_note = " / ".join(f"{room}={machine}" for room, machine in room_machine_map.items())
+
+    img_monthly = _fig_to_data_uri(
+        _fig_robot_monthly_rate(df_all, dept, periods, room_machine_map, used),
+        width=950,
+        height=260,
+    )
+    weekday_imgs = "\n".join(
+        '<img class="chart" src="'
+        + _fig_to_data_uri(
+            _fig_robot_weekday_rate(df_all, dept, periods, room_machine_map, m),
+            width=950,
+            height=240,
+        )
+        + f'" alt="曜日別{m}使用率">'
+        for m in used
+    )
+
+    section = f"""
+<!-- ダヴィンチ稼働率 -->
+<section class="page">
+  <h2>ダヴィンチ稼働状況（{scope_label}・営業日ベース）</h2>
+  <p class="meta">
+    営業日 = 平日(月〜金)で院内に手術が 1 件以上あった日（祝日・休診日は自動除外）。
+    使用率 = 当該機種が 1 件以上使われた営業日の割合。機種は手術室固定（{rooms_note}）。
+  </p>
+  <img class="chart" src="{img_monthly}" alt="月次ダヴィンチ使用率">
+  {weekday_imgs}
+</section>
+"""
+
+    if is_hospital:
+        share_imgs = "\n".join(
+            '<img class="chart" src="'
+            + _fig_to_data_uri(
+                _fig_robot_dept_share(df_all, periods, room_machine_map, m),
+                width=980,
+                height=300,
+            )
+            + f'" alt="{m}診療科構成">'
+            for m in used
+        )
+        section += f"""
+<!-- ダヴィンチ 診療科構成 -->
+<section class="page">
+  <h2>ダヴィンチ使用 診療科構成の推移（病院全体・月次・直近12ヶ月）</h2>
+  <p class="meta">各機種の症例数を診療科で積み上げ（左 = 実数、右 = 構成比 100%）。</p>
+  {share_imgs}
+</section>
+"""
+    return section
+
+
 def render_dept_html(
     df_dept: pd.DataFrame,
     dept: str,
     periods: ReportPeriods,
     target: int | None,
     generated_at: datetime,
+    df_all: pd.DataFrame | None = None,
+    room_machine_map: dict[str, str] | None = None,
 ) -> str:
+    # ダヴィンチ稼働率の分母（営業日）は病院全体で計算するため、未フィルタの
+    # 病院 df を別途受け取る。診療科レポートでは df_all=病院全体, df_dept=当該科。
+    # df_all 省略時は df_dept で代用（ロボット節は room_machine_map が空なら出ない）。
+    if df_all is None:
+        df_all = df_dept
+    robot_section = _build_robot_section(df_all, dept, periods, room_machine_map or {})
+
     kpi = kpi_overall_compare(df_dept, periods.recent_3mo, periods.yoy_3mo)
 
     img_monthly_count = _fig_to_data_uri(
-        _fig_monthly_count_rolling(df_dept, periods), width=950, height=240)
+        _fig_monthly_count_rolling(df_dept, periods), width=950, height=240
+    )
     img_monthly_avg = _fig_to_data_uri(
-        _fig_monthly_avg_time_rolling(df_dept, periods), width=950, height=240)
+        _fig_monthly_avg_time_rolling(df_dept, periods), width=950, height=240
+    )
     img_weekly_ga = _fig_to_data_uri(
-        _fig_weekly_ga_vs_target(df_dept, periods, target), width=1000, height=300)
+        _fig_weekly_ga_vs_target(df_dept, periods, target), width=1000, height=300
+    )
     img_monthly_ga = _fig_to_data_uri(
-        _fig_monthly_ga_rolling(df_dept, periods), width=950, height=260)
+        _fig_monthly_ga_rolling(df_dept, periods), width=950, height=260
+    )
     img_category_bar = _fig_to_data_uri(
-        _fig_category_bar_3mo(df_dept, periods), width=950, height=240)
+        _fig_category_bar_3mo(df_dept, periods), width=950, height=240
+    )
     img_category_monthly = _fig_to_data_uri(
-        _fig_category_monthly_rolling(df_dept, periods), width=950, height=320)
+        _fig_category_monthly_rolling(df_dept, periods), width=950, height=320
+    )
 
     kpi_cards = _build_kpi_cards(kpi)
 
     table_lead = _build_doctor_table_lead(
         kpi_per_doctor_compare_window(
-            df_dept, periods.recent_3mo, periods.prior_3mo,
-            mode="lead_only", top_n=20))
+            df_dept, periods.recent_3mo, periods.prior_3mo, mode="lead_only", top_n=20
+        )
+    )
     table_all = _build_doctor_table_all(
         kpi_per_doctor_compare_window(
-            df_dept, periods.recent_3mo, periods.prior_3mo,
-            mode="all", top_n=20))
+            df_dept, periods.recent_3mo, periods.prior_3mo, mode="all", top_n=20
+        )
+    )
 
     table_procedures = _build_topn_table(
         top_n_procedures(df_dept, periods.recent_3mo, periods.prior_3mo, n=10),
-        "確定術式", "主要術式 top 10")
+        "確定術式",
+        "主要術式 top 10",
+    )
     table_diagnoses = _build_topn_table(
         top_n_postop_diagnoses(df_dept, periods.recent_3mo, periods.prior_3mo, n=10),
-        "術後病名", "主要術後病名 top 10")
+        "術後病名",
+        "主要術後病名 top 10",
+    )
 
     target_summary = _build_target_summary(df_dept, periods, target)
 
@@ -689,6 +1095,7 @@ def render_dept_html(
         table_procedures=table_procedures,
         table_diagnoses=table_diagnoses,
         target_summary=target_summary,
+        robot_section=robot_section,
     )
 
 
@@ -704,6 +1111,8 @@ def render_dept_pdf(
     periods: ReportPeriods,
     target: int | None,
     generated_at: datetime | None = None,
+    df_all: pd.DataFrame | None = None,
+    room_machine_map: dict[str, str] | None = None,
 ) -> Path:
     """1 診療科分の PDF を生成して書き出す。"""
     from weasyprint import HTML  # noqa: PLC0415
@@ -711,7 +1120,15 @@ def render_dept_pdf(
     if generated_at is None:
         generated_at = datetime.now()
 
-    html = render_dept_html(df_dept, dept, periods, target, generated_at)
+    html = render_dept_html(
+        df_dept,
+        dept,
+        periods,
+        target,
+        generated_at,
+        df_all=df_all,
+        room_machine_map=room_machine_map,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     HTML(string=html).write_pdf(target=str(output_path))
     return output_path
@@ -752,6 +1169,7 @@ def export_all(
     only_dept: str | None = None,
     min_cases: int = MIN_CASE_COUNT,
     include_hospital: bool = True,
+    robot_rooms_path: Path | None = None,
 ) -> list[Path]:
     """全診療科 + 病院全体の PDF を出力する。
 
@@ -769,6 +1187,7 @@ def export_all(
         today = date.today()
     periods = report_periods(today)
     targets = load_dept_targets(targets_path)
+    room_machine_map = load_robot_rooms(robot_rooms_path or ROBOT_ROOMS_DEFAULT_PATH)
 
     # 出力ジョブ (ラベル, 対象 df, 週次全麻目標) を組み立てる。
     # 病院全体は実施診療科で絞らず df 全体を渡す。
@@ -778,22 +1197,26 @@ def export_all(
             jobs.append((HOSPITAL_LABEL, df, _hospital_weekly_target(targets)))
         else:
             t = targets.get(only_dept)
-            jobs.append((
-                only_dept,
-                df[df["実施診療科"] == only_dept],
-                t.weekly_general_anesthesia if t else None,
-            ))
+            jobs.append(
+                (
+                    only_dept,
+                    df[df["実施診療科"] == only_dept],
+                    t.weekly_general_anesthesia if t else None,
+                )
+            )
     else:
         # 病院全体を先頭に（生成順・一覧で最初に出す）
         if include_hospital:
             jobs.append((HOSPITAL_LABEL, df, _hospital_weekly_target(targets)))
         for dept in sorted(df["実施診療科"].dropna().unique().tolist()):
             t = targets.get(dept)
-            jobs.append((
-                dept,
-                df[df["実施診療科"] == dept],
-                t.weekly_general_anesthesia if t else None,
-            ))
+            jobs.append(
+                (
+                    dept,
+                    df[df["実施診療科"] == dept],
+                    t.weekly_general_anesthesia if t else None,
+                )
+            )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now()
@@ -807,15 +1230,23 @@ def export_all(
             if label != HOSPITAL_LABEL and n_window < min_cases:
                 logger.info(
                     "skip: %s (対象期間件数 %d < %d / 全期間 %d)",
-                    label, n_window, min_cases, len(df_d),
+                    label,
+                    n_window,
+                    min_cases,
+                    len(df_d),
                 )
                 continue
             out = output_dir / f"{label}.pdf"
             try:
                 render_dept_pdf(
-                    df_d, label, out, periods,
+                    df_d,
+                    label,
+                    out,
+                    periods,
                     target=target,
                     generated_at=generated_at,
+                    df_all=df,
+                    room_machine_map=room_machine_map,
                 )
                 written.append(out)
                 logger.info("出力: %s (対象期間件数 %d)", out, n_window)

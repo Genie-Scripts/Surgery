@@ -34,12 +34,15 @@ PDF レポート向け（src/export_pdf.py で使用）:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Literal
 
 import pandas as pd
 from dateutil.relativedelta import relativedelta
+
+logger = logging.getLogger(__name__)
 
 OperatorMode = Literal["lead_only", "all"]
 
@@ -192,14 +195,10 @@ def kpi_per_doctor_compare(
 
     merged["件数差"] = merged["件数_B"] - merged["件数_A"]
     # 件数比率: A=0 のときは NaN (新規参入の医師など)
-    merged["件数比率(%)"] = (
-        (merged["件数_B"] / merged["件数_A"].replace(0, pd.NA)) - 1
-    ) * 100
+    merged["件数比率(%)"] = ((merged["件数_B"] / merged["件数_A"].replace(0, pd.NA)) - 1) * 100
 
     if "平均手術時間_分_A" in merged.columns and "平均手術時間_分_B" in merged.columns:
-        merged["平均時間差_分"] = (
-            merged["平均手術時間_分_B"] - merged["平均手術時間_分_A"]
-        )
+        merged["平均時間差_分"] = merged["平均手術時間_分_B"] - merged["平均手術時間_分_A"]
 
     # 列順を整える（存在する列のみ）
     column_order = [
@@ -215,11 +214,7 @@ def kpi_per_doctor_compare(
     ]
     ordered = [c for c in column_order if c in merged.columns]
 
-    return (
-        merged[ordered]
-        .sort_values("件数_B", ascending=False, kind="stable")
-        .reset_index()
-    )
+    return merged[ordered].sort_values("件数_B", ascending=False, kind="stable").reset_index()
 
 
 def kpi_overall_period_compare(
@@ -235,9 +230,7 @@ def kpi_overall_period_compare(
     """
 
     def _slice(start: date, end: date) -> pd.DataFrame:
-        mask = (df[date_column] >= pd.Timestamp(start)) & (
-            df[date_column] <= pd.Timestamp(end)
-        )
+        mask = (df[date_column] >= pd.Timestamp(start)) & (df[date_column] <= pd.Timestamp(end))
         return df[mask]
 
     a = kpi_overall(_slice(*period_a))
@@ -268,9 +261,7 @@ def category_counts_period_compare(
     """
 
     def _slice(start: date, end: date) -> pd.DataFrame:
-        mask = (df[date_column] >= pd.Timestamp(start)) & (
-            df[date_column] <= pd.Timestamp(end)
-        )
+        mask = (df[date_column] >= pd.Timestamp(start)) & (df[date_column] <= pd.Timestamp(end))
         return df[mask]
 
     a = category_counts(_slice(*period_a)).rename(columns={"件数": "件数_A"})
@@ -334,6 +325,8 @@ class ReportPeriods:
     recent_3mo: tuple[date, date]
     prior_3mo: tuple[date, date]
     yoy_3mo: tuple[date, date]
+    recent_6mo: tuple[date, date]
+    yoy_6mo: tuple[date, date]
     recent_12mo: tuple[date, date]
     prior_12mo: tuple[date, date]
     weekly_12w: tuple[date, date]
@@ -395,6 +388,8 @@ def report_periods(today: date) -> ReportPeriods:
     - recent_3mo: cutoff を含む 3 ヶ月 (cutoff の月 1 日から 2 ヶ月遡って 1 日, cutoff)
     - prior_3mo:  recent_3mo の直前 3 ヶ月
     - yoy_3mo:    recent_3mo の 1 年前同 3 ヶ月
+    - recent_6mo:  cutoff を含む 6 ヶ月
+    - yoy_6mo:     recent_6mo の 1 年前同 6 ヶ月
     - recent_12mo: cutoff を含む 12 ヶ月
     - prior_12mo:  recent_12mo の直前 12 ヶ月
     - weekly_12w:  cutoff の週月曜を含む過去 12 週
@@ -408,6 +403,10 @@ def report_periods(today: date) -> ReportPeriods:
     prior_3mo_start = _shift_back_months(prior_3mo_end, 2)
     prior_3mo = (prior_3mo_start, prior_3mo_end)
     yoy_3mo = (_months_ago(recent_3mo_start, 12), _months_ago(cutoff, 12))
+
+    recent_6mo_start = _shift_back_months(cutoff, 5)  # 当月含めて 6 ヶ月遡る
+    recent_6mo = (recent_6mo_start, cutoff)
+    yoy_6mo = (_months_ago(recent_6mo_start, 12), _months_ago(cutoff, 12))
 
     recent_12mo_start = _shift_back_months(cutoff, 11)
     recent_12mo = (recent_12mo_start, cutoff)
@@ -426,6 +425,8 @@ def report_periods(today: date) -> ReportPeriods:
         recent_3mo=recent_3mo,
         prior_3mo=prior_3mo,
         yoy_3mo=yoy_3mo,
+        recent_6mo=recent_6mo,
+        yoy_6mo=yoy_6mo,
         recent_12mo=recent_12mo,
         prior_12mo=prior_12mo,
         weekly_12w=weekly_12w,
@@ -750,9 +751,7 @@ def kpi_per_doctor_compare_window(
             }
         ).reset_index()
         c_counts = (
-            c.groupby("医師", dropna=False).size()
-            if not c.empty
-            else pd.Series(dtype="int64")
+            c.groupby("医師", dropna=False).size() if not c.empty else pd.Series(dtype="int64")
         )
         out["比較件数"] = out["医師"].map(c_counts).fillna(0).astype("int64")
         out["差分"] = out["直近件数"].astype("int64") - out["比較件数"]
@@ -763,9 +762,7 @@ def kpi_per_doctor_compare_window(
     r_lead = r[r["役割"] == "執刀医"].groupby("医師", dropna=False).size()
     r_assist = r[r["役割"] == "助手"].groupby("医師", dropna=False).size()
     r_total = r.groupby("医師", dropna=False).size()
-    c_total = (
-        c.groupby("医師", dropna=False).size() if not c.empty else pd.Series(dtype="int64")
-    )
+    c_total = c.groupby("医師", dropna=False).size() if not c.empty else pd.Series(dtype="int64")
 
     all_doctors = r_total.index
     out = pd.DataFrame(
@@ -802,3 +799,184 @@ def category_counts_compare_window(
         c_n = int(c[col].sum()) if not c.empty else 0
         rows.append({"カテゴリ": col, "直近件数": r_n, "比較件数": c_n, "差分": r_n - c_n})
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# ダヴィンチ機種別 稼働率（営業日ベース）
+# ---------------------------------------------------------------------------
+#
+# 機種は手術室で一意に決まる（部屋固定）。`config/robot_rooms.yaml` の
+# {手術室: 機種ラベル} マップを `room_machine_map` として受け取る。
+#
+# 機種使用の判定 = 「ダヴィンチ症例フラグ（robot_assisted_davinci）AND 手術室」。
+# OR2/OR9 では非ダヴィンチの通常手術も行うため、部屋だけで数えてはいけない。
+#
+# 稼働率 = (当該機種が 1 件以上使われた営業日数) / (営業日数) × 100
+#   営業日 = 平日(月〜金) かつ 病院全体で 1 件以上手術がある日（データ駆動）。
+#   祝日・休診日・年末年始は「手術が無い日」として自動的に分母から外れる。
+#   分母は常に病院全体（df 全体）で計算し、分子のみ診療科で絞る（科間で比較可能）。
+
+WEEKDAY_LABELS = ("月", "火", "水", "木", "金")
+
+
+def davinci_machine_series(df: pd.DataFrame, room_machine_map: dict[str, str]) -> pd.Series:
+    """各行にダヴィンチ機種ラベルを付与した Series を返す（index は df に揃う）。
+
+    `robot_assisted_davinci == True` かつ `実施手術室` が `room_machine_map` に
+    含まれる行のみ機種ラベル、それ以外は `pd.NA`。
+    マップ外の手術室にダヴィンチ症例があれば warning（マッピングの取りこぼし検知）。
+    """
+    if "robot_assisted_davinci" not in df.columns or "実施手術室" not in df.columns:
+        return pd.Series(pd.NA, index=df.index, dtype="object")
+
+    is_dav = df["robot_assisted_davinci"].fillna(False).astype(bool)
+    machine = df["実施手術室"].map(room_machine_map)
+    result = machine.where(is_dav, other=pd.NA)
+
+    unmapped = df.loc[is_dav & machine.isna(), "実施手術室"].dropna().unique()
+    if len(unmapped):
+        logger.warning(
+            "robot_rooms マップ外の手術室にダヴィンチ症例: %s（使用率の分子から除外）",
+            sorted(unmapped.tolist()),
+        )
+    return result
+
+
+def _weekday_dates(slice_df: pd.DataFrame) -> pd.DatetimeIndex:
+    """slice_df の `手術実施日` のうち平日(月〜金)の日付（重複排除・正規化）。"""
+    if slice_df.empty:
+        return pd.DatetimeIndex([])
+    days = slice_df["手術実施日"].dropna()
+    days = days[days.dt.weekday < 5]
+    return pd.DatetimeIndex(days.dt.normalize().unique())
+
+
+def hospital_operating_days(df: pd.DataFrame, window: tuple[date, date]) -> pd.DatetimeIndex:
+    """window 内の営業日（平日かつ病院全体で 1 件以上手術がある日）の集合。
+
+    使用率の分母。常に病院全体 df を渡すこと。
+    """
+    return _weekday_dates(_slice_period(df, window))
+
+
+def robot_usage_days(
+    df: pd.DataFrame,
+    window: tuple[date, date],
+    machine: str,
+    room_machine_map: dict[str, str],
+    dept: str | None = None,
+) -> pd.DatetimeIndex:
+    """window 内で指定機種(SP/Xi)のダヴィンチ症例が 1 件以上ある平日の集合（分子）。
+
+    `dept` 指定時は `実施診療科` で絞る。
+    """
+    sliced = _slice_period(df, window)
+    if dept is not None and "実施診療科" in sliced.columns:
+        sliced = sliced[sliced["実施診療科"] == dept]
+    if sliced.empty:
+        return pd.DatetimeIndex([])
+    machines = davinci_machine_series(sliced, room_machine_map)
+    return _weekday_dates(sliced[machines == machine])
+
+
+def _rate(used: int, operating: int) -> float:
+    """使用率(%)。営業日 0 のときは NaN。"""
+    return (used / operating * 100) if operating else float("nan")
+
+
+def robot_monthly_usage_rate(
+    df: pd.DataFrame,
+    window: tuple[date, date],
+    machine: str,
+    room_machine_map: dict[str, str],
+    dept: str | None = None,
+) -> pd.DataFrame:
+    """月ごとの機種使用率。返却列: 月ラベル(YYYY-MM), 営業日数, 使用日数, 使用率(%)。
+
+    window 内の全月を欠損なく返す。営業日 0 の月は使用率 NaN。
+    """
+    operating = hospital_operating_days(df, window)
+    usage = robot_usage_days(df, window, machine, room_machine_map, dept)
+
+    op_by_month = (
+        pd.Series(1, index=operating).resample("MS").size()
+        if len(operating)
+        else pd.Series(dtype="int64")
+    )
+    use_by_month = (
+        pd.Series(1, index=usage).resample("MS").size() if len(usage) else pd.Series(dtype="int64")
+    )
+
+    rows = []
+    for m in _month_iter(window):
+        o = int(op_by_month.get(m, 0))
+        u = int(use_by_month.get(m, 0))
+        rows.append(
+            {"月ラベル": m.strftime("%Y-%m"), "営業日数": o, "使用日数": u, "使用率": _rate(u, o)}
+        )
+    return pd.DataFrame(rows)
+
+
+def robot_weekday_usage_rate(
+    df: pd.DataFrame,
+    window: tuple[date, date],
+    machine: str,
+    room_machine_map: dict[str, str],
+    dept: str | None = None,
+) -> pd.DataFrame:
+    """曜日(月〜金)ごとの機種使用率。返却列: 曜日, 営業日数, 使用日数, 使用率(%)。
+
+    分母 = window 内のその曜日の営業日数、分子 = うち当該機種が使われた日数。
+    営業日 0 の曜日は使用率 NaN。
+    """
+    operating = hospital_operating_days(df, window)
+    usage = robot_usage_days(df, window, machine, room_machine_map, dept)
+
+    op_by_wd = (
+        pd.Series(operating).dt.weekday.value_counts()
+        if len(operating)
+        else pd.Series(dtype="int64")
+    )
+    use_by_wd = (
+        pd.Series(usage).dt.weekday.value_counts() if len(usage) else pd.Series(dtype="int64")
+    )
+
+    rows = []
+    for wd in range(5):
+        o = int(op_by_wd.get(wd, 0))
+        u = int(use_by_wd.get(wd, 0))
+        rows.append(
+            {"曜日": WEEKDAY_LABELS[wd], "営業日数": o, "使用日数": u, "使用率": _rate(u, o)}
+        )
+    return pd.DataFrame(rows)
+
+
+def robot_dept_share_monthly(
+    df: pd.DataFrame,
+    window: tuple[date, date],
+    machine: str,
+    room_machine_map: dict[str, str],
+) -> pd.DataFrame:
+    """月次 × 診療科の当該機種症例数（積み上げ棒用）。
+
+    index = 月ラベル(YYYY-MM, window 内の全月)、列 = 診療科、値 = 症例数（0 埋め）。
+    該当症例が無ければ列なしの DataFrame（index のみ）。
+    """
+    months = [m.strftime("%Y-%m") for m in _month_iter(window)]
+    sliced = _slice_period(df, window)
+    if sliced.empty:
+        return pd.DataFrame(index=months)
+
+    machines = davinci_machine_series(sliced, room_machine_map)
+    sub = sliced[machines == machine]
+    if sub.empty or "実施診療科" not in sub.columns:
+        return pd.DataFrame(index=months)
+
+    pivot = sub.assign(月ラベル=sub["手術実施日"].dt.strftime("%Y-%m")).pivot_table(
+        index="月ラベル",
+        columns="実施診療科",
+        values="手術実施日",
+        aggfunc="size",
+        fill_value=0,
+    )
+    return pivot.reindex(months, fill_value=0)

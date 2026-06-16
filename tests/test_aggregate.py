@@ -13,8 +13,10 @@ from src.aggregate import (
     category_counts_compare_window,
     category_counts_period_compare,
     category_monthly_trend,
+    davinci_machine_series,
     expand_operators,
     fiscal_year_periods,
+    hospital_operating_days,
     is_general_anesthesia,
     kpi_overall,
     kpi_overall_compare,
@@ -29,6 +31,10 @@ from src.aggregate import (
     monthly_general_anesthesia_compare,
     monthly_trend,
     report_periods,
+    robot_dept_share_monthly,
+    robot_monthly_usage_rate,
+    robot_usage_days,
+    robot_weekday_usage_rate,
     top_n_postop_diagnoses,
     top_n_procedures,
     weekly_general_anesthesia,
@@ -113,9 +119,7 @@ def test_kpi_overall_empty():
 def test_monthly_trend_three_months():
     df = pd.DataFrame(
         {
-            "手術実施日": pd.to_datetime(
-                ["2025-04-15", "2025-04-20", "2025-05-10", "2025-06-01"]
-            ),
+            "手術実施日": pd.to_datetime(["2025-04-15", "2025-04-20", "2025-05-10", "2025-06-01"]),
             "予定手術時間": [30, 60, 120, 90],
         }
     )
@@ -229,24 +233,36 @@ def _make_long_for_compare():
         {
             "手術実施日": pd.to_datetime(
                 [
-                    "2025-04-15", "2025-05-05",  # 医師_001 A 期 2件
-                    "2025-06-10", "2025-06-25", "2025-07-01",  # 医師_001 B 期 3件
+                    "2025-04-15",
+                    "2025-05-05",  # 医師_001 A 期 2件
+                    "2025-06-10",
+                    "2025-06-25",
+                    "2025-07-01",  # 医師_001 B 期 3件
                     "2025-04-20",  # 医師_002 A 期 1件
-                    "2025-07-15", "2025-07-20",  # 医師_003 B 期 2件
+                    "2025-07-15",
+                    "2025-07-20",  # 医師_003 B 期 2件
                 ]
             ),
             "医師": [
-                "医師_001", "医師_001",
-                "医師_001", "医師_001", "医師_001",
+                "医師_001",
+                "医師_001",
+                "医師_001",
+                "医師_001",
+                "医師_001",
                 "医師_002",
-                "医師_003", "医師_003",
+                "医師_003",
+                "医師_003",
             ],
             "予定手術時間": [30, 60, 40, 50, 60, 90, 45, 50],
             "申込区分": [
-                "緊急", "通常",
-                "通常", "通常", "通常",
+                "緊急",
                 "通常",
-                "緊急", "緊急",
+                "通常",
+                "通常",
+                "通常",
+                "通常",
+                "緊急",
+                "緊急",
             ],
         }
     )
@@ -325,8 +341,13 @@ def _make_period_compare_df():
         {
             "手術実施日": pd.to_datetime(
                 [
-                    "2025-01-15", "2025-02-10", "2025-02-25",  # 期間 A: 3 件
-                    "2025-03-05", "2025-03-20", "2025-04-08", "2025-04-30",  # 期間 B: 4 件
+                    "2025-01-15",
+                    "2025-02-10",
+                    "2025-02-25",  # 期間 A: 3 件
+                    "2025-03-05",
+                    "2025-03-20",
+                    "2025-04-08",
+                    "2025-04-30",  # 期間 B: 4 件
                 ]
             ),
             "予定手術時間": [60, 90, 120, 30, 60, 90, 120],
@@ -628,10 +649,20 @@ def test_kpi_per_doctor_compare_window_lead_only():
     df = _make_yoy_df()
     p = report_periods(date(2026, 5, 27))
     out = kpi_per_doctor_compare_window(
-        df, p.recent_3mo, p.yoy_3mo, mode="lead_only", top_n=10,
+        df,
+        p.recent_3mo,
+        p.yoy_3mo,
+        mode="lead_only",
+        top_n=10,
     )
     assert list(out.columns) == [
-        "順位", "医師", "直近件数", "比較件数", "差分", "平均時間_分", "緊急件数",
+        "順位",
+        "医師",
+        "直近件数",
+        "比較件数",
+        "差分",
+        "平均時間_分",
+        "緊急件数",
     ]
     by = out.set_index("医師")
     assert by.loc["医A", "直近件数"] == 2
@@ -644,10 +675,20 @@ def test_kpi_per_doctor_compare_window_all_includes_assistants():
     df = _make_yoy_df()
     p = report_periods(date(2026, 5, 27))
     out = kpi_per_doctor_compare_window(
-        df, p.recent_3mo, p.yoy_3mo, mode="all", top_n=10,
+        df,
+        p.recent_3mo,
+        p.yoy_3mo,
+        mode="all",
+        top_n=10,
     )
     assert list(out.columns) == [
-        "順位", "医師", "直近執刀", "直近助手", "直近合計", "比較合計", "差分",
+        "順位",
+        "医師",
+        "直近執刀",
+        "直近助手",
+        "直近合計",
+        "比較合計",
+        "差分",
     ]
     by = out.set_index("医師")
     assert by.loc["医A", "直近執刀"] == 2
@@ -694,3 +735,139 @@ def test_monthly_category_compare():
     last = out.iloc[-1]
     assert last["直近"] == 2  # 2026-04 の malignant_tumor=True が 2 件
     assert last["前期"] == 0
+
+
+def test_report_periods_6mo_windows():
+    """直近6ヶ月 / 前年同6ヶ月の窓を確認（cutoff 2026-04-30）。"""
+    p = report_periods(date(2026, 5, 27))
+    assert p.recent_6mo == (date(2025, 11, 1), date(2026, 4, 30))
+    assert p.yoy_6mo == (date(2024, 11, 1), date(2025, 4, 30))
+
+
+# --- ダヴィンチ機種別 稼働率（営業日ベース） -------------------------------
+
+ROBOT_MAP = {"ＯＰ－２": "SP", "ＯＰ－９": "Xi"}
+APR = (date(2025, 4, 1), date(2025, 4, 30))
+
+
+def _make_robot_df() -> pd.DataFrame:
+    """2025-04 の既知シナリオ。
+
+    曜日: 04-01=火, 04-02=水, 04-03=木, 04-04=金, 04-05=土, 04-07=月, 04-08=火。
+    営業日(平日かつ手術あり) = 01,02,03,04,07,08 の 6 日（04-05 土は除外、無手術平日なし）。
+    SP(OR2 davinci, 平日)  = 04-01, 04-08 → 2 日（04-05 土・04-03 非davinci は除外）。
+    Xi(OR9 davinci, 平日)  = 04-02, 04-08 → 2 日。
+    """
+
+    def row(d: str, room: str, dept: str, dav: bool) -> dict:
+        return {
+            "手術実施日": pd.Timestamp(d),
+            "実施手術室": room,
+            "実施診療科": dept,
+            "robot_assisted_davinci": dav,
+        }
+
+    return pd.DataFrame(
+        [
+            row("2025-04-01", "ＯＰ－２", "泌尿器科", True),  # 火 SP
+            row("2025-04-02", "ＯＰ－９", "一般消化器外科", True),  # 水 Xi
+            row("2025-04-03", "ＯＰ－２", "泌尿器科", False),  # 木 OR2 だが非davinci
+            row("2025-04-04", "ＯＰ－５", "整形外科", False),  # 金 他室
+            row("2025-04-05", "ＯＰ－２", "泌尿器科", True),  # 土 SP（平日でない→除外）
+            row("2025-04-07", "ＯＰ－３", "内科", False),  # 月
+            row("2025-04-08", "ＯＰ－２", "産婦人科", True),  # 火 SP（2 件目）
+            row("2025-04-08", "ＯＰ－９", "呼吸器外科", True),  # 火 Xi
+        ]
+    )
+
+
+def test_hospital_operating_days_weekday_with_surgery():
+    days = hospital_operating_days(_make_robot_df(), APR)
+    got = sorted(d.strftime("%Y-%m-%d") for d in days)
+    assert got == [
+        "2025-04-01",
+        "2025-04-02",
+        "2025-04-03",
+        "2025-04-04",
+        "2025-04-07",
+        "2025-04-08",
+    ]
+    assert "2025-04-05" not in got  # 土曜は営業日でない
+
+
+def test_robot_usage_days_and_condition_and_weekday():
+    df = _make_robot_df()
+    sp = robot_usage_days(df, APR, "SP", ROBOT_MAP)
+    xi = robot_usage_days(df, APR, "Xi", ROBOT_MAP)
+    # 04-03(OR2 非davinci) と 04-05(土) は SP に入らない
+    assert sorted(d.strftime("%m-%d") for d in sp) == ["04-01", "04-08"]
+    assert sorted(d.strftime("%m-%d") for d in xi) == ["04-02", "04-08"]
+
+
+def test_robot_usage_days_dept_filter():
+    df = _make_robot_df()
+    sp_uro = robot_usage_days(df, APR, "SP", ROBOT_MAP, dept="泌尿器科")
+    # 産婦人科の 04-08 は分子から外れ、泌尿器科の 04-01 のみ
+    assert sorted(d.strftime("%m-%d") for d in sp_uro) == ["04-01"]
+
+
+def test_davinci_machine_series_labels_and_na():
+    s = davinci_machine_series(_make_robot_df(), ROBOT_MAP)
+    assert s.iloc[0] == "SP"  # 04-01 OR2 davinci
+    assert s.iloc[1] == "Xi"  # 04-02 OR9 davinci
+    assert pd.isna(s.iloc[2])  # 04-03 OR2 だが非davinci
+    assert pd.isna(s.iloc[3])  # OR5（マップ外・非davinci）
+
+
+def test_davinci_machine_series_warns_on_unmapped_room(caplog):
+    df = pd.DataFrame(
+        {
+            "手術実施日": pd.to_datetime(["2025-04-01"]),
+            "実施手術室": ["ＯＰ－７"],  # davinci だがマップに無い手術室
+            "実施診療科": ["泌尿器科"],
+            "robot_assisted_davinci": [True],
+        }
+    )
+    with caplog.at_level("WARNING"):
+        s = davinci_machine_series(df, ROBOT_MAP)
+    assert pd.isna(s.iloc[0])
+    assert "マップ外" in caplog.text
+
+
+def test_robot_monthly_usage_rate():
+    out = robot_monthly_usage_rate(_make_robot_df(), APR, "SP", ROBOT_MAP)
+    assert len(out) == 1
+    r = out.iloc[0]
+    assert r["月ラベル"] == "2025-04"
+    assert r["営業日数"] == 6
+    assert r["使用日数"] == 2
+    assert r["使用率"] == pytest.approx(2 / 6 * 100)
+
+
+def test_robot_monthly_usage_rate_nan_without_operating_days():
+    # データの無い 2025-05 → 営業日 0 → 使用率 NaN
+    out = robot_monthly_usage_rate(
+        _make_robot_df(), (date(2025, 5, 1), date(2025, 5, 31)), "SP", ROBOT_MAP
+    )
+    assert len(out) == 1
+    assert out.iloc[0]["営業日数"] == 0
+    assert pd.isna(out.iloc[0]["使用率"])
+
+
+def test_robot_weekday_usage_rate():
+    out = robot_weekday_usage_rate(_make_robot_df(), APR, "SP", ROBOT_MAP).set_index("曜日")
+    # 火: 営業日 2 (04-01, 04-08)、SP 使用 2 → 100%
+    assert out.loc["火", "営業日数"] == 2
+    assert out.loc["火", "使用日数"] == 2
+    assert out.loc["火", "使用率"] == pytest.approx(100.0)
+    # 月: 営業日 1 (04-07)、SP 使用 0 → 0%
+    assert out.loc["月", "営業日数"] == 1
+    assert out.loc["月", "使用率"] == pytest.approx(0.0)
+
+
+def test_robot_dept_share_monthly_counts_cases_not_days():
+    out = robot_dept_share_monthly(_make_robot_df(), APR, "SP", ROBOT_MAP)
+    # 診療科比率は症例数ベース（営業日フィルタ無し）。
+    # SP 症例(OR2 davinci): 泌尿器科 2 (04-01, 04-05 土), 産婦人科 1 (04-08)
+    assert out.loc["2025-04", "泌尿器科"] == 2
+    assert out.loc["2025-04", "産婦人科"] == 1

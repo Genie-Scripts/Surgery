@@ -22,6 +22,7 @@ from src.export_pdf import (
     _hospital_weekly_target,
     export_all,
     load_dept_targets,
+    load_robot_rooms,
     render_dept_html,
     render_dept_pdf,
 )
@@ -45,9 +46,7 @@ def _make_df(dept: str = "整形外科", n: int = 50, ly_n: int | None = None) -
                 "予定手術時間": 120 + (i % 5) * 30,
                 "申込区分": "緊急" if i % 10 == 0 else "通常",
                 "麻酔種別": (
-                    "全身麻酔(20分以上：吸入もしくは静脈麻酔薬)"
-                    if i % 2 == 0
-                    else "局所麻酔"
+                    "全身麻酔(20分以上：吸入もしくは静脈麻酔薬)" if i % 2 == 0 else "局所麻酔"
                 ),
                 "実施術者": f"医師_{i % 5:03d}",
                 "執刀医": f"医師_{i % 5:03d}",
@@ -69,9 +68,7 @@ def _make_df(dept: str = "整形外科", n: int = 50, ly_n: int | None = None) -
                 "予定手術時間": 100 + (i % 4) * 30,
                 "申込区分": "通常",
                 "麻酔種別": (
-                    "全身麻酔(20分以上：吸入もしくは静脈麻酔薬)"
-                    if i % 3 == 0
-                    else "局所麻酔"
+                    "全身麻酔(20分以上：吸入もしくは静脈麻酔薬)" if i % 3 == 0 else "局所麻酔"
                 ),
                 "実施術者": f"医師_{i % 4:03d}",
                 "執刀医": f"医師_{i % 4:03d}",
@@ -145,8 +142,7 @@ def test_export_all_includes_hospital_by_default(tmp_path: Path):
     df.to_parquet(parquet)
     targets = tmp_path / "targets.yaml"
     targets.write_text(
-        "整形外科:\n  weekly_general_anesthesia: 5\n"
-        "泌尿器科:\n  weekly_general_anesthesia: 3\n",
+        "整形外科:\n  weekly_general_anesthesia: 5\n泌尿器科:\n  weekly_general_anesthesia: 3\n",
         encoding="utf-8",
     )
 
@@ -169,9 +165,7 @@ def test_export_all_no_hospital_excludes_hospital(tmp_path: Path):
     targets.write_text("整形外科:\n  weekly_general_anesthesia: 5\n", encoding="utf-8")
 
     out_dir = tmp_path / "out"
-    written = export_all(
-        parquet, out_dir, targets, today=date(2026, 5, 27), include_hospital=False
-    )
+    written = export_all(parquet, out_dir, targets, today=date(2026, 5, 27), include_hospital=False)
     names = [p.name for p in written]
     assert f"{HOSPITAL_LABEL}.pdf" not in names
     assert "整形外科.pdf" in names
@@ -215,8 +209,7 @@ def test_hospital_weekly_target_round_half_up(tmp_path: Path):
     """ちょうど .5 は切り上げる（ROUND_HALF_UP、銀行丸めではない）。"""
     targets_path = tmp_path / "targets.yaml"
     targets_path.write_text(
-        "A:\n  weekly_general_anesthesia: 2.0\n"
-        "B:\n  weekly_general_anesthesia: 2.5\n",
+        "A:\n  weekly_general_anesthesia: 2.0\nB:\n  weekly_general_anesthesia: 2.5\n",
         encoding="utf-8",
     )
     targets = load_dept_targets(targets_path)
@@ -233,3 +226,152 @@ def test_load_dept_targets_missing_file_returns_empty(tmp_path: Path):
 def test_min_case_count_default():
     """既定値が 30 件であること（運用要件）。"""
     assert MIN_CASE_COUNT == 30
+
+
+# --- ダヴィンチ稼働率の節 ----------------------------------------------------
+
+ROBOT_MAP = {"ＯＰ－２": "ダヴィンチSP", "ＯＰ－９": "ダヴィンチXi"}
+
+
+def _make_robot_hospital_df() -> pd.DataFrame:
+    """病院全体 df。背景手術（営業日の分母）＋ SP/Xi のダヴィンチ症例を散らす。
+
+    SP(OR2): 泌尿器科=月曜, 産婦人科=金曜。Xi(OR9): 一般消化器外科=水曜。
+    整形外科は OR5 の非ダヴィンチのみ（ロボット節が出ないことの確認用）。
+    """
+    rows = []
+
+    def add(d: pd.Timestamp, room: str, dept: str, dav: bool) -> None:
+        rows.append(
+            {
+                "手術実施日": pd.Timestamp(d),
+                "実施診療科": dept,
+                "実施手術室": room,
+                "予定手術時間": 120,
+                "申込区分": "通常",
+                "麻酔種別": "全身麻酔(20分以上：吸入もしくは静脈麻酔薬)",
+                "実施術者": "医師_001",
+                "執刀医": "医師_001",
+                "助手リスト": [],
+                "確定術式": "手術用支援" if dav else "通常術式",
+                "術後病名": "病名",
+                "malignant_tumor": False,
+                "artificial_joint": False,
+                "robot_assisted_davinci": dav,
+                "robot_assisted_other": False,
+            }
+        )
+
+    for d in pd.date_range("2024-11-01", "2026-04-30", freq="B"):
+        add(d, "ＯＰ－５", "整形外科", False)
+    for d in pd.date_range("2024-11-04", "2026-04-30", freq="W-MON"):
+        add(d, "ＯＰ－２", "泌尿器科", True)
+    for d in pd.date_range("2026-01-02", "2026-04-30", freq="W-FRI"):
+        add(d, "ＯＰ－２", "産婦人科", True)
+    for d in pd.date_range("2024-11-06", "2026-04-30", freq="W-WED"):
+        add(d, "ＯＰ－９", "一般消化器外科", True)
+    return pd.DataFrame(rows)
+
+
+def test_robot_section_hospital_has_usage_and_share_pages():
+    df = _make_robot_hospital_df()
+    periods = report_periods(date(2026, 5, 27))
+    html = render_dept_html(
+        df,
+        HOSPITAL_LABEL,
+        periods,
+        target=None,
+        generated_at=datetime(2026, 5, 27),
+        df_all=df,
+        room_machine_map=ROBOT_MAP,
+    )
+    assert "ダヴィンチ稼働状況（病院全体" in html
+    assert "診療科構成の推移" in html  # 病院全体は構成ページあり
+    # SP/Xi 両方の曜日別図と、両機種の診療科構成図
+    assert 'alt="曜日別ダヴィンチSP使用率"' in html
+    assert 'alt="曜日別ダヴィンチXi使用率"' in html
+    assert 'alt="ダヴィンチSP診療科構成"' in html
+    # 基本 6 枚 + ロボット図（月次1 + 曜日2 + 構成2 = 5）
+    assert html.count("data:image/png;base64,") == 11
+
+
+def test_robot_section_department_shows_only_used_machine():
+    df = _make_robot_hospital_df()
+    periods = report_periods(date(2026, 5, 27))
+    uro = df[df["実施診療科"] == "泌尿器科"]
+    html = render_dept_html(
+        uro,
+        "泌尿器科",
+        periods,
+        target=None,
+        generated_at=datetime(2026, 5, 27),
+        df_all=df,
+        room_machine_map=ROBOT_MAP,
+    )
+    assert "ダヴィンチ稼働状況（泌尿器科" in html
+    assert "診療科構成の推移" not in html  # 診療科レポートに構成ページは無い
+    # 泌尿器科は OR2(SP) のみ使用 → SP の曜日別だけ、Xi の曜日別は描かれない
+    assert 'alt="曜日別ダヴィンチSP使用率"' in html
+    assert 'alt="曜日別ダヴィンチXi使用率"' not in html
+    # 基本 6 枚 + 月次1 + 曜日(SP)1 = 8
+    assert html.count("data:image/png;base64,") == 8
+
+
+def test_robot_section_absent_for_non_davinci_dept():
+    df = _make_robot_hospital_df()
+    periods = report_periods(date(2026, 5, 27))
+    ortho = df[df["実施診療科"] == "整形外科"]
+    html = render_dept_html(
+        ortho,
+        "整形外科",
+        periods,
+        target=10,
+        generated_at=datetime(2026, 5, 27),
+        df_all=df,
+        room_machine_map=ROBOT_MAP,
+    )
+    assert "ダヴィンチ稼働状況" not in html
+    assert html.count("data:image/png;base64,") == 6
+
+
+def test_robot_section_absent_without_room_map():
+    """room_machine_map 未指定（既存呼び出し互換）ではロボット節は出ない。"""
+    df = _make_robot_hospital_df()
+    periods = report_periods(date(2026, 5, 27))
+    html = render_dept_html(
+        df,
+        HOSPITAL_LABEL,
+        periods,
+        target=None,
+        generated_at=datetime(2026, 5, 27),
+    )
+    assert "ダヴィンチ稼働状況" not in html
+    assert html.count("data:image/png;base64,") == 6
+
+
+def test_render_hospital_pdf_with_robot_section(tmp_path: Path):
+    df = _make_robot_hospital_df()
+    periods = report_periods(date(2026, 5, 27))
+    out = tmp_path / "hospital.pdf"
+    render_dept_pdf(
+        df,
+        HOSPITAL_LABEL,
+        out,
+        periods,
+        target=None,
+        df_all=df,
+        room_machine_map=ROBOT_MAP,
+    )
+    assert out.exists()
+    assert out.read_bytes()[:4] == b"%PDF"
+    assert out.stat().st_size > 10_000
+
+
+def test_load_robot_rooms_reads_yaml(tmp_path: Path):
+    p = tmp_path / "rr.yaml"
+    p.write_text("ＯＰ－２: ダヴィンチSP\nＯＰ－９: ダヴィンチXi\n", encoding="utf-8")
+    assert load_robot_rooms(p) == {"ＯＰ－２": "ダヴィンチSP", "ＯＰ－９": "ダヴィンチXi"}
+
+
+def test_load_robot_rooms_missing_returns_empty(tmp_path: Path):
+    assert load_robot_rooms(tmp_path / "nope.yaml") == {}
