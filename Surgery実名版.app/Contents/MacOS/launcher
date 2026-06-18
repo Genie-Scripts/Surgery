@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Surgery 実名版ランチャ（.app バンドル本体）
+# scripts/local_run.sh に処理を委譲する。失敗時はダイアログで通知。
+
+set -u
+
+# .app の位置から自己解決（フォルダ移動に強い）。
+# 実行ファイル: <project>/Surgery実名版.app/Contents/MacOS/launcher → ../../.. が Surgery プロジェクト。
+DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+SCRIPT="${DIR}/scripts/local_run.sh"
+LOG="/tmp/surgery_launcher.log"
+
+{
+    echo "=== $(date '+%Y-%m-%d %H:%M:%S') launcher start ==="
+    if [ ! -x "${SCRIPT}" ]; then
+        echo "ERROR: ${SCRIPT} が見つからない / 実行権限がない"
+        osascript -e "display alert \"Surgery 実名版\" message \"起動スクリプトが見つかりません:\n${SCRIPT}\" as critical" >/dev/null 2>&1 || true
+        exit 1
+    fi
+    "${SCRIPT}"
+    rc=$?
+    echo "=== exit=${rc} ==="
+    if [ "${rc}" -ne 0 ]; then
+        osascript -e "display alert \"Surgery 実名版\" message \"起動に失敗しました (exit=${rc})。ログ: ${LOG}\" as critical" >/dev/null 2>&1 || true
+    fi
+    exit "${rc}"
+} >>"${LOG}" 2>&1
