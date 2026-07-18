@@ -42,7 +42,7 @@ CURRENT_MODEL = "Llama-3.1-Swallow-8B-Instruct-v0.5"
 # 既定の比較対象（oMLX 配信中の候補。--models で上書き可）
 DEFAULT_MODELS = [
     CURRENT_MODEL,
-    "Qwen3.6-27B-UD-MLX-4bit",
+    "Qwen3.6-27B-OptiQ-4bit",
 ]
 
 # 人手ラベル付き gold ケース。値は「raw LLM がこう答えるべき」期待 ID 集合。
