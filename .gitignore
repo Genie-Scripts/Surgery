@@ -12,8 +12,14 @@ config/master_key.csv
 config/master_key.*.csv
 config/peers.csv
 
-# 集計の中間生成物（小さい YAML/CSV はコミット可、parquet は実データ由来で除外）
+# 集計の中間生成物（parquet は実データ由来で除外）。
+# aggregated CSV は術者名キー（個人別の月次集計など）を含みうるため、
+# PUBLIC リポジトリでは安全側で全除外する（必要な匿名化済み CSV は force-add で個別に）。
 data/aggregated/*.parquet
+data/aggregated/*.csv
+
+# data/ 直下の使い捨て探索スクリプト（実名データを読み込むため追跡しない）
+data/*.py
 
 # サンプル CSV（ルート直下に置かれた状態のもの。匿名化済みでも安全側で除外）
 /anonymized_data*.csv
