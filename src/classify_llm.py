@@ -14,6 +14,7 @@ Swallow-8B などのローカル LLM で再判定する。
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import re
@@ -189,6 +190,41 @@ def classify_one(
     return _apply_hard_guard(parsed, text), "llm"
 
 
+def _classify_worker(
+    text: str,
+    rules: list[CategoryRule],
+    client: LLMClient,
+    cache_snapshot: dict[str, list[str]],
+) -> tuple[list[str], str, tuple[str, list[str]] | None]:
+    """並列ワーカー: DataFrame には一切触れず、計算だけを行う。
+
+    `cache_snapshot` は読み取り専用として扱う（書込みは呼び出し元がメインスレッドで一括反映）。
+    `classify_one` へは、このテキストのキーだけを含むローカル dict を渡すことで、
+    判定ロジック自体は現状と1文字も変えずに再利用する。
+
+    Returns:
+        (カテゴリ ID リスト, 判定元, キャッシュ差分)
+        キャッシュ差分は "llm" 判定で新規エントリが生じた場合のみ (key, raw値) を返し、
+        それ以外は None。
+        ワーカー内で予期しない例外が発生した場合も、ここで吸収し
+        ([], "llm_fallback", None) に縮退させる（全体を落とさない）。
+    """
+    key = LLMClient.cache_key(
+        {"rule_version": RULE_VERSION, "model": client.config.model, "text": text}
+    )
+    local_cache: dict[str, list[str]] = (
+        {key: cache_snapshot[key]} if key in cache_snapshot else {}
+    )
+    try:
+        ids, source = classify_one(text, rules, client, local_cache)
+    except Exception as e:  # pragma: no cover - ワーカー内の予期しない例外の安全網
+        logger.warning("LLM ワーカーで予期しない例外 → 空リストでフォールバック: %s", e)
+        return [], "llm_fallback", None
+
+    cache_update = (key, local_cache[key]) if source == "llm" else None
+    return ids, source, cache_update
+
+
 def classify_with_llm(
     df: pd.DataFrame,
     rules: list[CategoryRule],
@@ -196,12 +232,19 @@ def classify_with_llm(
     cache_path: Path = CACHE_PATH_DEFAULT,
     target_column: str = "確定術式",
     progress: bool = True,
+    max_workers: int = 4,
 ) -> pd.DataFrame:
     """`LLM判定要 == True` の行だけ LLM で再判定し、カテゴリ列を上書きする。
 
     入力 `df` は `src.classify.classify()` の出力を想定（カテゴリ列・LLM判定要 列が付いている）。
     返り値は `df` のコピーに `分類元` 列を追加。値は "regex" / "cache" / "llm" / "llm_fallback"。
     LLM が利用不可（サーバ未起動・モデル未取得）の場合は regex 結果のまま `分類元 = "regex"` を付けて返す。
+
+    LLM 呼び出しはユニークな `target_column` テキストごとに 1 回だけ `ThreadPoolExecutor`
+    (`max_workers` 並列) で行う。同一テキストが複数行にまたがる場合、判定元が "llm" のときは
+    元の index 順で最初の行だけ "llm"、2 件目以降は "cache" とし（逐次実行時の挙動と一致させる）、
+    "cache" / "llm_fallback" のときは全行にそのまま適用する。DataFrame への書込みはメインスレッドで
+    一括して行う（pandas は行違いでも並行書込みの安全性が保証されないため）。
     """
     if "LLM判定要" not in df.columns:
         raise ValueError("classify() の出力 (LLM判定要 列付き) を渡してください")
@@ -222,26 +265,64 @@ def classify_with_llm(
     cache: dict[str, list[str]] = _cache_load(cache_path) if run_llm else {}
     cache_size_before = len(cache)
 
-    for n_done, idx in enumerate(target_idx if run_llm else [], start=1):
-        text = out.at[idx, target_column]
-        if not isinstance(text, str) or not text:
+    if run_llm:
+        # 空/非文字列テキストの行は LLM 呼び出し対象外（現状ロジックを維持）。
+        # それ以外はテキストでグルーピングし、ユニークテキストごとに 1 回だけ判定する。
+        empty_idx: list = []
+        text_groups: dict[str, list] = {}
+        for idx in target_idx:
+            text = out.at[idx, target_column]
+            if not isinstance(text, str) or not text:
+                empty_idx.append(idx)
+                continue
+            text_groups.setdefault(text, []).append(idx)
+
+        n_done = 0
+        for idx in empty_idx:
             out.at[idx, "分類元"] = "llm_fallback"
             for cid in valid_ids:
                 out.at[idx, cid] = False
-            continue
+            n_done += 1
+            if progress and n_done % 25 == 0:
+                logger.info("LLM 判定 進捗 %d / %d", n_done, n_target)
 
-        ids, source = classify_one(text, rules, client, cache)
-        # regex 結果（最低保証）と LLM 結果を OR 結合（ハードガードは最終一括適用で行う）。
-        # こうすれば LLM が拾い損ねた regex 確実ケースを保持しつつ、
-        # 文字列要件を満たさない過剰検出は最終パスで一括除去できる。
-        for cid in valid_ids:
-            regex_says_true = bool(out.at[idx, cid])
-            llm_says_true = cid in ids
-            out.at[idx, cid] = regex_says_true or llm_says_true
-        out.at[idx, "分類元"] = source
+        cache_snapshot = dict(cache)  # ワーカーには読み取り専用のスナップショットを渡す
+        results: dict[str, tuple[list[str], str, tuple[str, list[str]] | None]] = {}
 
-        if progress and n_done % 25 == 0:
-            logger.info("LLM 判定 進捗 %d / %d", n_done, n_target)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_text = {
+                executor.submit(_classify_worker, text, rules, client, cache_snapshot): text
+                for text in text_groups
+            }
+            for future in concurrent.futures.as_completed(future_to_text):
+                text = future_to_text[future]
+                results[text] = future.result()
+                for _ in text_groups[text]:
+                    n_done += 1
+                    if progress and n_done % 25 == 0:
+                        logger.info("LLM 判定 進捗 %d / %d", n_done, n_target)
+
+        # キャッシュ差分をメインスレッドで一括反映
+        for _text, (_ids, _source, cache_update) in results.items():
+            if cache_update is not None:
+                key, raw_parsed = cache_update
+                cache[key] = raw_parsed
+
+        # DataFrame への書込みもメインスレッドで一括反映（ロジックは逐次版と同一）
+        for text, idx_list in text_groups.items():
+            ids, source, _cache_update = results[text]
+            for i, idx in enumerate(idx_list):
+                row_source = source
+                if source == "llm" and i > 0:
+                    row_source = "cache"
+                # regex 結果（最低保証）と LLM 結果を OR 結合（ハードガードは最終一括適用で行う）。
+                # こうすれば LLM が拾い損ねた regex 確実ケースを保持しつつ、
+                # 文字列要件を満たさない過剰検出は最終パスで一括除去できる。
+                for cid in valid_ids:
+                    regex_says_true = bool(out.at[idx, cid])
+                    llm_says_true = cid in ids
+                    out.at[idx, cid] = regex_says_true or llm_says_true
+                out.at[idx, "分類元"] = row_source
 
     if len(cache) > cache_size_before:
         _cache_save(cache_path, cache)

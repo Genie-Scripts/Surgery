@@ -5,6 +5,7 @@ oMLX は呼ばず、`FakeClient` で LLM レスポンスを差し替える。
 
 from __future__ import annotations
 
+import time
 import urllib.error
 from pathlib import Path
 from typing import Any
@@ -325,6 +326,79 @@ def test_classify_with_llm_skips_when_unavailable(rules, tmp_path: Path):
     assert (out["分類元"] == "regex").all()
     # LLM は呼ばれていない
     assert fake.calls == []
+
+
+class SleepyFakeClient:
+    """並列実行の実時間検証用: chat() 呼び出しごとに `sleep_seconds` 秒スリープする。"""
+
+    def __init__(self, sleep_seconds: float, available: bool = True) -> None:
+        self.sleep_seconds = sleep_seconds
+        self.available = available
+        self.config = _FakeConfig()
+
+    def is_available(self) -> bool:
+        return self.available
+
+    def chat(self, prompt: str, **kwargs: Any) -> str:
+        time.sleep(self.sleep_seconds)
+        return "CATEGORIES: []"
+
+
+def test_classify_with_llm_parallel_output_matches_serial(rules, tmp_path: Path):
+    """max_workers=1 (逐次相当) と並列実行 (max_workers=4) で出力が完全一致することを検証する。
+
+    重複テキストを含め、`分類元` の "llm"/"cache" 振り分け（最初の行だけ "llm"、
+    以降は "cache"）が並列化で崩れないことを確認する。
+    """
+    cases = [
+        "水晶体再建術",  # regex 0 ヒット → LLM
+        "水晶体再建術",  # 重複
+        "脳腫瘍摘出術",  # regex 0 ヒット → LLM (悪性判定)
+        "脳腫瘍摘出術",  # 重複
+        "脳腫瘍摘出術",  # 重複
+        "腹腔鏡下胆嚢摘出術",  # regex 0 ヒット → LLM (誤判定 → ハードガードで除去)
+    ]
+    df = classify(pd.DataFrame({"確定術式": cases}))
+
+    responses = {
+        "水晶体再建術": "CATEGORIES: []",
+        "脳腫瘍摘出術": "CATEGORIES: [malignant_tumor]",
+        "胆嚢摘出術": "CATEGORIES: [robot_assisted_davinci]",
+    }
+
+    fake_serial = FakeClient(responses_by_substring=responses)
+    out_serial = classify_with_llm(
+        df, rules, fake_serial, cache_path=tmp_path / "serial.json", max_workers=1
+    )
+
+    fake_parallel = FakeClient(responses_by_substring=responses)
+    out_parallel = classify_with_llm(
+        df, rules, fake_parallel, cache_path=tmp_path / "parallel.json", max_workers=4
+    )
+
+    pd.testing.assert_frame_equal(out_serial, out_parallel)
+
+    # 重複テキストの分類元振り分け（最初=llm, 以降=cache）が逐次実行時の挙動と一致
+    assert list(out_serial["分類元"]) == ["llm", "cache", "llm", "cache", "cache", "llm"]
+
+
+def test_classify_with_llm_runs_in_parallel(rules, tmp_path: Path):
+    """並列実行が直列合計より明確に短いことを検証する（sleep 入り FakeClient）。"""
+    n_unique = 8
+    sleep_seconds = 0.15
+    cases = [f"ダミー未知術式サンプル{i}のみ" for i in range(n_unique)]
+    df = classify(pd.DataFrame({"確定術式": cases}))
+    assert df["LLM判定要"].sum() == n_unique  # 全件 regex 0 ヒットで LLM 対象であること
+
+    fake = SleepyFakeClient(sleep_seconds=sleep_seconds)
+    start = time.monotonic()
+    classify_with_llm(df, rules, fake, cache_path=tmp_path / "c.json", max_workers=4)
+    elapsed = time.monotonic() - start
+
+    serial_estimate = n_unique * sleep_seconds  # 1.2s
+    # 4 並列の理論値は serial_estimate / 4 (=0.3s) 程度。オーバーヘッドを見込んでも
+    # 直列合計を大きく下回ることを確認する（flaky にならない緩い閾値）。
+    assert elapsed < serial_estimate * 0.6
 
 
 def test_classify_with_llm_final_guard_pass_catches_regex_only_rows(rules, tmp_path: Path):
