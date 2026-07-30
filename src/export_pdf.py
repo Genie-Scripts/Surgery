@@ -188,6 +188,23 @@ def _fig_to_data_uri(fig: go.Figure, width: int = 900, height: int = 280) -> str
     return f"data:image/png;base64,{b64}"
 
 
+def _series_text(series: pd.Series, digits: int | None = None, hide_zero: bool = False) -> list[str]:
+    """折れ線・棒グラフの数値ラベル用テキスト。
+
+    NaN は空文字。hide_zero=True なら 0 も空文字にする（積み上げ棒で視認性を保つため）。
+    digits=None は整数表記、digits=N は小数第 N 位までの浮動小数表記。
+    """
+    out = []
+    for v in series:
+        if pd.isna(v) or (hide_zero and v == 0):
+            out.append("")
+        elif digits is None:
+            out.append(f"{int(v)}")
+        else:
+            out.append(f"{v:.{digits}f}")
+    return out
+
+
 def _fig_monthly_count_rolling(df_dept: pd.DataFrame, periods: ReportPeriods) -> go.Figure:
     mt = monthly_count_compare(df_dept, periods.recent_12mo, periods.prior_12mo)
     fig = go.Figure()
@@ -195,20 +212,26 @@ def _fig_monthly_count_rolling(df_dept: pd.DataFrame, periods: ReportPeriods) ->
         go.Scatter(
             x=mt["月ラベル"],
             y=mt["直近"],
-            mode="lines+markers",
+            mode="lines+markers+text",
             name="直近12ヶ月",
             line={"color": COLOR_PRIMARY, "width": 2.5},
             marker={"size": 7},
+            text=_series_text(mt["直近"]),
+            textposition="top center",
+            textfont={"size": 9, "color": COLOR_PRIMARY},
         )
     )
     fig.add_trace(
         go.Scatter(
             x=mt["月ラベル"],
             y=mt["前期"],
-            mode="lines+markers",
+            mode="lines+markers+text",
             name="その前12ヶ月",
             line={"color": COLOR_COMPARE, "width": 2, "dash": "dot"},
             marker={"size": 6},
+            text=_series_text(mt["前期"]),
+            textposition="bottom center",
+            textfont={"size": 9, "color": COLOR_MUTED},
         )
     )
     return _common_layout(fig, title="月次 件数（直近12ヶ月 vs その前12ヶ月）")
@@ -221,22 +244,28 @@ def _fig_monthly_avg_time_rolling(df_dept: pd.DataFrame, periods: ReportPeriods)
         go.Scatter(
             x=mt["月ラベル"],
             y=mt["直近"],
-            mode="lines+markers",
+            mode="lines+markers+text",
             name="直近12ヶ月",
             line={"color": COLOR_PRIMARY, "width": 2.5},
             marker={"size": 7},
             connectgaps=False,
+            text=_series_text(mt["直近"], digits=1),
+            textposition="top center",
+            textfont={"size": 9, "color": COLOR_PRIMARY},
         )
     )
     fig.add_trace(
         go.Scatter(
             x=mt["月ラベル"],
             y=mt["前期"],
-            mode="lines+markers",
+            mode="lines+markers+text",
             name="その前12ヶ月",
             line={"color": COLOR_COMPARE, "width": 2, "dash": "dot"},
             marker={"size": 6},
             connectgaps=False,
+            text=_series_text(mt["前期"], digits=1),
+            textposition="bottom center",
+            textfont={"size": 9, "color": COLOR_MUTED},
         )
     )
     return _common_layout(fig, title="月次 平均手術時間 (分)")
@@ -302,20 +331,26 @@ def _fig_monthly_ga_rolling(df_dept: pd.DataFrame, periods: ReportPeriods) -> go
         go.Scatter(
             x=mt["月ラベル"],
             y=mt["直近"],
-            mode="lines+markers",
+            mode="lines+markers+text",
             name="直近12ヶ月",
             line={"color": COLOR_PRIMARY, "width": 2.5},
             marker={"size": 7},
+            text=_series_text(mt["直近"]),
+            textposition="top center",
+            textfont={"size": 9, "color": COLOR_PRIMARY},
         )
     )
     fig.add_trace(
         go.Scatter(
             x=mt["月ラベル"],
             y=mt["前期"],
-            mode="lines+markers",
+            mode="lines+markers+text",
             name="その前12ヶ月",
             line={"color": COLOR_COMPARE, "width": 2, "dash": "dot"},
             marker={"size": 6},
+            text=_series_text(mt["前期"]),
+            textposition="bottom center",
+            textfont={"size": 9, "color": COLOR_MUTED},
         )
     )
     return _common_layout(fig, title="月次 全麻手術件数（直近12ヶ月 vs その前12ヶ月）")
@@ -369,15 +404,20 @@ def _fig_category_monthly_rolling(df_dept: pd.DataFrame, periods: ReportPeriods)
     for i, cat in enumerate(cats[:4]):
         row, col = i // 2 + 1, i % 2 + 1
         mt = monthly_category_compare(df_dept, periods.recent_12mo, periods.prior_12mo, cat)
+        max_val = max(mt["直近"].max(), mt["前期"].max(), 1) if not mt.empty else 1
+        fig.update_yaxes(range=[0, max_val * 1.25], row=row, col=col)
         fig.add_trace(
             go.Scatter(
                 x=mt["月ラベル"],
                 y=mt["直近"],
-                mode="lines+markers",
+                mode="lines+markers+text",
                 line={"color": COLOR_PRIMARY, "width": 2},
                 marker={"size": 5},
                 showlegend=(i == 0),
                 name="直近12ヶ月",
+                text=_series_text(mt["直近"], hide_zero=True),
+                textposition="top center",
+                textfont={"size": 8, "color": COLOR_PRIMARY},
             ),
             row=row,
             col=col,
@@ -386,11 +426,14 @@ def _fig_category_monthly_rolling(df_dept: pd.DataFrame, periods: ReportPeriods)
             go.Scatter(
                 x=mt["月ラベル"],
                 y=mt["前期"],
-                mode="lines+markers",
+                mode="lines+markers+text",
                 line={"color": COLOR_COMPARE, "width": 1.5, "dash": "dot"},
                 marker={"size": 5},
                 showlegend=(i == 0),
                 name="その前12ヶ月",
+                text=_series_text(mt["前期"], hide_zero=True),
+                textposition="bottom center",
+                textfont={"size": 8, "color": COLOR_MUTED},
             ),
             row=row,
             col=col,
@@ -445,11 +488,14 @@ def _fig_robot_monthly_rate(
             go.Scatter(
                 x=mt["月ラベル"],
                 y=mt["使用率"],
-                mode="lines+markers",
+                mode="lines+markers+text",
                 name=machine,
                 line={"color": color, "width": 2.5},
                 marker={"size": 6},
                 connectgaps=False,
+                text=_rate_bar_labels(mt["使用率"]),
+                textposition="top center" if i % 2 == 0 else "bottom center",
+                textfont={"size": 9, "color": color},
             )
         )
     fig = _common_layout(fig, title="月次 ダヴィンチ使用率（営業日ベース・直近12ヶ月）")
@@ -524,6 +570,9 @@ def _fig_robot_dept_share(
                 marker_color=DEPT_PALETTE[i % len(DEPT_PALETTE)],
                 legendgroup=d,
                 showlegend=True,
+                text=_series_text(pivot[d], hide_zero=True),
+                textposition="inside",
+                textfont={"size": 8, "color": "#fff"},
             ),
             row=1,
             col=1,
@@ -531,14 +580,19 @@ def _fig_robot_dept_share(
     totals = pivot.sum(axis=1)
     pct = pivot.div(totals.replace(0, pd.NA), axis=0) * 100
     for i, d in enumerate(depts):
+        pct_col = pct[d].fillna(0)
+        pct_labels = [f"{s}%" if s else s for s in _series_text(pct_col, digits=0, hide_zero=True)]
         fig.add_trace(
             go.Bar(
                 x=months,
-                y=pct[d].fillna(0).tolist(),
+                y=pct_col.tolist(),
                 name=d,
                 marker_color=DEPT_PALETTE[i % len(DEPT_PALETTE)],
                 legendgroup=d,
                 showlegend=False,
+                text=pct_labels,
+                textposition="inside",
+                textfont={"size": 8, "color": "#fff"},
             ),
             row=1,
             col=2,
